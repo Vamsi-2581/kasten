@@ -13,13 +13,16 @@ file holding it moves, and an `index.md` is made of nothing else.
 The rule a target is read by is the frontend's, in `frontend/src/lib/wikilink.ts`,
 and the two have to agree: the note `gf` opens is the note a rename here follows.
 That is `splitTarget` taking the heading and the alias off `[[name#heading|alias]]`,
-then `wikiLinkPath` finding the note the name is. Two copies of one rule is the
-cost of the editor resolving a link without asking the server, and the tests on
-both sides describe the same cases.
+then `wikiLinkPath` finding the note the name is. `names_a_file` and
+`named_path` are the half of `wikiLinkPath` that tells a file from a note. Two
+copies of one rule is the cost of the editor resolving a link without asking the
+server, so the cases live once, in `backend/tests/link_paths.json`, and both
+test suites read them.
 """
 
 import posixpath
 import re
+from bisect import bisect_right
 from typing import TYPE_CHECKING, NamedTuple
 from urllib.parse import unquote
 
@@ -27,7 +30,9 @@ from kasten_backend.search import notes_holding
 from kasten_backend.vault import (
     ASSET_MAGIC,
     HTML_SUFFIX,
+    books_beside,
     encode_href,
+    list_assets,
     list_html,
     list_markdown_files,
     write_note,
@@ -59,6 +64,12 @@ space ends the link for every reader, so it ends it here too.
 
 SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 """An href that names a place outside the vault: `https:`, `mailto:` and the rest."""
+
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+"""A line that opens or closes a fenced code block, and what follows the fence on it."""
+
+BACKTICKS = re.compile(r"`+")
+"""One run of backticks, which opens or closes an inline code span."""
 
 
 class Target(NamedTuple):
@@ -146,6 +157,111 @@ def _respell(name: str, new: str) -> str:
     return stem if "/" in name else stem.rsplit("/", 1)[-1]
 
 
+def code_spans(text: str) -> list[tuple[int, int]]:
+    """Where `text` holds code, as `(start, end)` offsets: fenced blocks, then inline spans.
+
+    A `[[x]]` in code is an example of the syntax and not a link, so a move
+    leaves it as written, the way Obsidian does. The fences are CommonMark's:
+    three or more backticks or tildes, indented by at most three spaces, closed
+    by a line of the same character at least as long, and a fence nobody closed
+    runs to the end of the note. A backtick fence whose info string holds a
+    backtick is inline code and opens nothing.
+
+    An indented block is not read as code. Four spaces is also how a list item
+    continues, and a link in one of those is a link.
+
+    Where the reading is in doubt the text is not code: a link wrongly taken
+    for code is left pointing at nothing, and one wrongly taken for a link is
+    only rewritten, as every move did before this read code at all.
+
+    Split on the line feed alone, not `splitlines`, which also breaks at a form feed or
+    U+2028 and would open a fence in the middle of a line.
+    """
+    spans = []
+    fence: tuple[str, int] | None = None
+    offset = 0
+    for line in text.split("\n"):
+        end = min(offset + len(line) + 1, len(text))
+        marker = FENCE.match(line)
+        if fence is not None:
+            if (
+                marker
+                and marker[1][0] == fence[0][0]
+                and len(marker[1]) >= len(fence[0])
+                and not marker[2].strip()
+            ):
+                spans.append((fence[1], end))
+                fence = None
+        elif marker and not (marker[1][0] == "`" and "`" in marker[2]):
+            fence = (marker[1], offset)
+        else:
+            spans += [(offset + start, offset + stop) for start, stop in _inline_code(line)]
+        offset += len(line) + 1
+    if fence is not None:
+        spans.append((fence[1], len(text)))
+    return spans
+
+
+def _inline_code(line: str) -> list[tuple[int, int]]:
+    """The inline code spans of one line: a run of backticks closed by the next run as long.
+
+    One line, where CommonMark lets a span run on to the end of its paragraph:
+    telling where a paragraph ends means parsing lists, headings and tables, and
+    a stray backtick in one list item must not hide the links of the next.
+
+    A backslash escapes the first backtick of a run that opens, and the rest of
+    the run opens as a shorter one; inside code a backslash is only a backslash,
+    so a closer is taken as written.
+
+    A run that starts inside a `[[link]]` may close a span and never opens one,
+    so a backtick in an alias cannot pair with one later on the line and hide
+    the links between. It still closes: blanking the link instead would move a
+    span's real end past it, and hide the links after.
+
+    Paired by a walk over the runs rather than by a pattern, which would scan to
+    the end of the line from every unclosed run.
+    """
+    links = [link.span() for link in WIKILINK.finditer(line)]
+    runs = [run.span() for run in BACKTICKS.finditer(line)]
+    by_width: dict[int, list[int]] = {}
+    for index, (start, stop) in enumerate(runs):
+        by_width.setdefault(stop - start, []).append(index)
+
+    spans = []
+    index = 0
+    while index < len(runs):
+        start, stop = runs[index]
+        index += 1
+        start += _backslashes_before(line, start) % 2
+        if start == stop or _inside(start, links):
+            continue
+        same = by_width.get(stop - start, [])
+        closer = bisect_right(same, index - 1)
+        if closer == len(same):
+            continue
+        spans.append((start, runs[same[closer]][1]))
+        index = same[closer] + 1
+    return spans
+
+
+def _backslashes_before(line: str, position: int) -> int:
+    """How many backslashes run up to `position`, an odd count escaping what follows."""
+    count = 0
+    while count < position and line[position - count - 1] == "\\":
+        count += 1
+    return count
+
+
+def _inside(position: int, spans: list[tuple[int, int]]) -> bool:
+    """Whether `position` falls in one of `spans`, sorted and apart.
+
+    A search rather than a scan of every span, which on a long note full of code
+    held the event loop for seconds: one scan per link.
+    """
+    index = bisect_right(spans, position, key=lambda span: span[0])
+    return index > 0 and position < spans[index - 1][1]
+
+
 def relink(text: str, moves: dict[str, str], paths: list[str]) -> str:
     """`text` with every link naming a note in `moves` naming where it lands.
 
@@ -154,8 +270,11 @@ def relink(text: str, moves: dict[str, str], paths: list[str]) -> str:
     per note in the subtree, and a link would be resolved against a listing that
     a previous pass had already made wrong.
     """
+    code = code_spans(text)
 
     def rewrite(match: re.Match[str]) -> str:
+        if _inside(match.start(), code):
+            return match.group(0)
         target = match.group(1)
         name = split_target(target).name
         # `[[#Risks]]` is a heading of the note it sits in, and names no note
@@ -231,8 +350,11 @@ def relink_markdown(text: str, before: str, after: str, old: str, new: str) -> s
     """
     here = posixpath.dirname(before)
     there = posixpath.dirname(after)
+    code = code_spans(text)
 
     def rewrite(match: re.Match[str]) -> str:
+        if _inside(match.start(), code):
+            return match.group(0)
         href = match.group(2)
         target = markdown_target(href, here)
         if target is None:
@@ -291,14 +413,23 @@ async def plan_move(root: Path, old: str, new: str, *, folder: bool) -> dict[str
     for needle in {name, encode_href(name)}:
         candidates.update(await notes_holding(root, needle))
 
-    # The pages in a moving folder move with it, and a `[[link]]` that spelled
-    # one's path follows. Added after the candidates: a page is read by the
-    # browser, never rewritten here.
-    pages = list_html(root)
+    # The pages and assets in a moving folder move with it, and a `[[link]]`
+    # that spelled one's path follows. Added after the candidates: a file is
+    # read by the browser, never rewritten here. They are in the listing too,
+    # or a bare `[[plan.pdf]]` would name nothing a move could take anywhere.
+    files = list_html(root) + list_assets(root)
     if folder:
-        moves |= {page: moved(page, old, new) for page in pages if page.startswith(f"{old}/")}
+        moves |= {file: moved(file, old, new) for file in files if file.startswith(f"{old}/")}
+    else:
+        # A note's books go with it, unless their landing is taken, and asking
+        # the function the move asks is what keeps a held-back book's links
+        # where the book still is.
+        books = books_beside(root / old, root / new)
+        moves |= {
+            book.relative_to(root).as_posix(): to.relative_to(root).as_posix() for book, to in books
+        }
 
-    return _plan(root, sorted(candidates), moves, paths + pages, (old, new))
+    return _plan(root, sorted(candidates), moves, paths + files, (old, new))
 
 
 def _plan(
