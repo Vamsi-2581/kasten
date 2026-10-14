@@ -142,6 +142,17 @@ async def test_local_graph_keeps_its_centre(client: AsyncClient, small: Path) ->
     assert paths(answer) == {"ideas/Embeddings.md", "rag.md", "GraphRAG paper.md"}
 
 
+async def test_local_graph_centres_a_note_named_like_a_file(
+    client: AsyncClient, vault: Path
+) -> None:
+    write(vault, "plan.pdf.md", "See [[rag]].\n")
+    write(vault, "rag.md", "x\n")
+
+    answer = await graph(client, around="plan.pdf.md", depth=1)
+
+    assert paths(answer) == {"plan.pdf.md", "rag.md"}
+
+
 async def test_pattern_answers_rows(client: AsyncClient, small: Path) -> None:
     answer = await graph(client, q="?paper supports ?idea; ?idea depends-on [[Embeddings]]")
 
@@ -207,9 +218,23 @@ async def test_reads_a_heading_and_an_alias_after_a_path(client: AsyncClient, va
         "reading/borges#Ficciones|his stories",
         "borges|and/or",
         "borges|a#b",
+        "report.html",
+        "report.html|x",
+        "plan.pdf",
+        "Plan.PDF",
+        "docs/plan.pdf",
     ],
 )
 def test_resolver_agrees_with_link_path(target: str) -> None:
-    listing = ["borges.md", "reading/borges.md", "z/other.md"]
+    listing = ["borges.md", "plan.pdf", "reading/borges.md", "report.html", "z/other.md"]
 
     assert resolver(listing)(target) == link_path(target, listing)
+
+
+def test_resolver_reads_a_file_link_as_that_file() -> None:
+    # A page and an asset are named by their whole file name, so neither
+    # becomes a note by a `.md` on the end.
+    resolve = resolver(["plan.pdf", "report.html"])
+
+    assert resolve("report.html") == "report.html"
+    assert resolve("plan.pdf") == "plan.pdf"
