@@ -60,6 +60,7 @@ import type { TreeCommands } from "@/lib/key-bindings";
 import type { MoveMode } from "@/lib/move";
 import { readField, setField } from "@/lib/note-frontmatter";
 import { bookNote, bookType, importedNote, noteName } from "@/lib/note-path";
+import { noteSectionOf } from "@/lib/note-section";
 import { ONTOLOGY_NOTE, relationNames } from "@/lib/ontology";
 import { paletteEntries, viewCommands } from "@/lib/palette";
 import { type Direction, paneToward } from "@/lib/pane-direction";
@@ -114,7 +115,7 @@ import { useNoteWrites } from "@/lib/use-note-writes";
 import { useViewport } from "@/lib/use-viewport";
 import { parseVaultEvent } from "@/lib/vault-events";
 import { setWatched } from "@/lib/video";
-import { outgoingLinks, wikiLinkPath } from "@/lib/wikilink";
+import { outgoingLinks, splitTarget, wikiLinkPath } from "@/lib/wikilink";
 
 /** What an unfocused pane's editor reports its typing to, which is nowhere. */
 const IGNORE = () => {};
@@ -918,13 +919,35 @@ function Home() {
    * `body` is what a note this makes starts life with, and it is empty for
    * every link followed by hand: a note the reader is about to write is one
    * they write themselves. Only the periodic keys pass one.
+   *
+   * `[[note#heading]]` opens the note at the heading, read through the query
+   * cache the panes read by; a heading the note lacks opens it at the top.
+   * `[[#heading]]` names no note, and the editor jumps within its own.
    */
   const follow = useCallback(
     (target: string, body = "") => {
       const paths = data ?? [];
+      const { name, heading } = splitTarget(target);
+      if (name === "") return;
       const path = wikiLinkPath(target, linkable ?? []);
       if (html?.includes(path)) {
         void openHtmlInPane(path);
+        return;
+      }
+      if (paths.includes(path) && heading !== null) {
+        // A note opened while this one was read is where the reader went
+        // next, and the jump arriving late must not pull them back.
+        const from = focusedNote.current.path;
+        const open = (line?: number) => {
+          if (focusedNote.current.path === from) void openInPane(path, line);
+        };
+        void queryClient
+          .fetchQuery({ queryKey: ["note", path], queryFn: () => fetchNote(path) })
+          .then(
+            (text) => open(noteSectionOf(text, heading)?.line),
+            // A note that will not read is still worth opening, at the top.
+            () => open(),
+          );
         return;
       }
       if (paths.includes(path)) {
@@ -2080,6 +2103,7 @@ function Home() {
                         tags={tags}
                         relations={relations}
                         startLine={shown.line}
+                        jump={shown.jump}
                         focusSignal={focused ? focusSignal : 0}
                         focused={focused}
                         // Only the focused pane reports its typing. Nothing else can

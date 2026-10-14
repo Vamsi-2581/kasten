@@ -2721,6 +2721,181 @@ describe("following a link to a page of HTML", () => {
     expect(createNote).not.toHaveBeenCalled();
     expect(document.querySelector("[data-html-pane]")).toBeNull();
   });
+
+  it("opens the page behind an alias", async () => {
+    await follow("2026-10-07.html|the paper");
+
+    expect(document.querySelector("[data-html-pane] iframe")?.getAttribute("title")).toBe(PAGE);
+  });
+});
+
+describe("following a link with an alias or a heading", () => {
+  const NOTE = "index.md";
+  const OTHER = "reading/borges.md";
+  /** Frontmatter first, so the heading's line counts the block above the body. */
+  /** Line 6 links back to its own heading by name, for following it twice. */
+  const BORGES = "---\nid: 01\n---\n# Borges\n\n[[borges#Life]]\n\n## Life\n\nborn 1899\n";
+  const LIFE = 8;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal("scrollTo", () => {});
+    FakeEventSource.last = undefined;
+    fetchFiles.mockResolvedValue([NOTE, OTHER]);
+    saveNote.mockImplementation(async (path: string, content: string) => ({ path, content }));
+    createNote.mockImplementation(async (path: string, content: string) => ({ path, content }));
+    fetchTodos.mockResolvedValue([]);
+    fetchImages.mockResolvedValue([]);
+    fetchHtml.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.resetAllMocks();
+  });
+
+  /** Open the note holding `link` on its first line, the cursor on it, and press `gf`. */
+  async function follow(link: string, below = "") {
+    fetchNote.mockImplementation(async (path: string) =>
+      path === NOTE ? `[[${link}]]\n${below}` : BORGES,
+    );
+    const app = await renderApp();
+    await settle();
+    app.click(NOTE);
+    await settle();
+    app.press("g");
+    app.press("f");
+    await settle();
+    return app;
+  }
+
+  /** The text in the editor and the line its cursor sits on. */
+  function opened() {
+    const view = EditorView.findFromDOM(document.querySelector(".cm-editor") as HTMLElement);
+    if (!view) throw new Error("No editor is mounted");
+    const { state } = view;
+    return { text: state.doc.toString(), line: state.doc.lineAt(state.selection.main.head).number };
+  }
+
+  it("opens the note an alias is written on", async () => {
+    await follow("borges|Jorge");
+
+    expect(createNote).not.toHaveBeenCalled();
+    expect(opened().text).toBe(BORGES);
+  });
+
+  it("opens the note at the heading", async () => {
+    await follow("borges#Life");
+
+    expect(createNote).not.toHaveBeenCalled();
+    expect(opened()).toEqual({ text: BORGES, line: LIFE });
+  });
+
+  it("opens the note at the heading behind an alias", async () => {
+    await follow("borges#life|his life");
+
+    expect(opened()).toEqual({ text: BORGES, line: LIFE });
+  });
+
+  it("opens the note as a plain link does for a heading it does not hold", async () => {
+    await follow("borges#Death");
+
+    // Where the body starts, under the frontmatter, which is where any note opens.
+    expect(createNote).not.toHaveBeenCalled();
+    expect(opened()).toEqual({ text: BORGES, line: 4 });
+  });
+
+  it("jumps to a heading of the note it is written in, making no note", async () => {
+    await follow("#Below", "\ntext\n\n## Below\n");
+
+    expect(createNote).not.toHaveBeenCalled();
+    expect(opened()).toEqual({ text: "[[#Below]]\n\ntext\n\n## Below\n", line: 5 });
+  });
+
+  it("jumps again on a second gf to the heading of the note already open", async () => {
+    const app = await follow("borges#Life");
+    expect(opened().line).toBe(LIFE);
+
+    // Back to the link, and the same jump once more: the pane already holds
+    // this note at this line, so only a fresh open says to move.
+    app.press("6");
+    app.press("G");
+    expect(opened().line).toBe(6);
+    app.press("g");
+    app.press("f");
+    await settle();
+
+    expect(opened().line).toBe(LIFE);
+  });
+
+  it("jumps again on a second gf to a heading of its own note", async () => {
+    const app = await follow("#Below", "\ntext\n\n## Below\n");
+    expect(opened().line).toBe(5);
+
+    app.press("g");
+    app.press("g");
+    app.press("g");
+    app.press("f");
+    await settle();
+
+    expect(opened().line).toBe(5);
+  });
+
+  it("jumps to a heading of its own note by the text on screen, saved or not", async () => {
+    fetchNote.mockResolvedValue("[[#Below]]\n\ntext\n\n## Below\n");
+    const app = await renderApp();
+    await settle();
+    app.click(NOTE);
+    await settle();
+
+    // A copy of the link pasted under it, which no save has reached yet: the
+    // heading is a line further down than the vault has it.
+    for (const key of ["y", "y", "p", "g", "f"]) app.press(key);
+    await settle();
+
+    expect(opened().line).toBe(6);
+  });
+
+  it("drops the jump when another note was opened while the heading was read", async () => {
+    let answer: (text: string) => void = () => {};
+    fetchFiles.mockResolvedValue([NOTE, OTHER, "kafka.md"]);
+    fetchNote.mockImplementation(async (path: string) => {
+      if (path === NOTE) return "[[borges#Life]]\n";
+      if (path === "kafka.md") return "the trial\n";
+      return new Promise<string>((resolve) => {
+        answer = resolve;
+      });
+    });
+    const app = await renderApp();
+    await settle();
+    app.click(NOTE);
+    await settle();
+    app.press("g");
+    app.press("f");
+    await settle();
+
+    app.click("kafka.md");
+    await settle();
+    answer(BORGES);
+    await settle();
+
+    expect(opened().text).toBe("the trial\n");
+  });
+
+  it("makes a missing note under its name, not its alias", async () => {
+    await follow("cortazar|Julio");
+
+    expect(createNote.mock.calls).toEqual([["00 Inbox/cortazar.md", ""]]);
+  });
+
+  it("makes a missing note under its name, not its heading", async () => {
+    await follow("rayuela#One");
+
+    expect(createNote.mock.calls).toEqual([["00 Inbox/rayuela.md", ""]]);
+  });
 });
 
 describe("opening a highlight's book with gf", () => {
