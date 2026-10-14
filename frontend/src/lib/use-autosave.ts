@@ -74,6 +74,29 @@ export function useAutosave(path: string | undefined) {
   // goes when its event arrives, and one whose event never comes outlives its
   // note, which is the staleness `lastWritten` has always carried.
   const adopted = useRef(new Map<string, string>());
+  // The same writes by text, set the moment `adopt` is called. The map above
+  // waits on `crypto.subtle`, and the route moves the cache straight after
+  // adopting: on a loaded machine the editor's reload asks before the digest
+  // lands, and found nothing to match. The editor asks about text, so it is
+  // answered from here and never has to wait.
+  const adoptedText = useRef(new Set<string>());
+  // Digests of our own writes still on `crypto.subtle`. The stream's question
+  // is about a digest, so an event arriving while one is out cannot be told
+  // from somebody else's write yet, and is answered once they are all in.
+  const hashing = useRef(new Set<Promise<void>>());
+  const track = useCallback((landing: Promise<void>) => {
+    hashing.current.add(landing);
+    // `finally` and not a second handler, so a failure the digest's own handler
+    // rethrows still surfaces rather than being swallowed here.
+    void landing.finally(() => hashing.current.delete(landing));
+  }, []);
+  // Events `reconcile` is still deciding about. Each holds the autosave the way
+  // a conflict does, because one of them may be somebody else's write, and a
+  // save before the answer would overwrite it with no conflict ever shown.
+  const holding = useRef(0);
+  // Bumped by every write that goes out, so a held event can tell whether `:w`
+  // has since overwritten whatever it turns out to be.
+  const saves = useRef(0);
   const queryClient = useQueryClient();
 
   /** Resolves to whether the vault holds the text, so `<leader>q` can refuse. */
@@ -88,6 +111,7 @@ export function useAutosave(path: string | undefined) {
     // Reaching this at all is the reader deciding to overwrite: the timer stops
     // short of it while the note stands conflicted, and `:w` does not.
     conflicted.current = false;
+    saves.current += 1;
     const sent = reverts.current;
     setStatus("saving");
     setReason(undefined);
@@ -102,19 +126,21 @@ export function useAutosave(path: string | undefined) {
         // this one. Hashing the other would recognise nothing and read every
         // save of our own as somebody else's write.
         lastText.current = note.content;
-        void digestOf(note.content).then(
-          (digest) => {
-            lastWritten.current = digest;
-          },
-          (error: unknown) => {
-            // `crypto.subtle` is missing outside a secure context, which is a
-            // proxy serving the app over plain http and nothing else. Left
-            // unhandled it is an unhandled rejection per save; handled, the
-            // hook simply recognises none of its own writes, so a save the
-            // typing carried on through raises a conflict the reader clears
-            // with `:w`. Wrong in the direction that writes nothing.
-            if (!(error instanceof TypeError)) throw error;
-          },
+        track(
+          digestOf(note.content).then(
+            (digest) => {
+              lastWritten.current = digest;
+            },
+            (error: unknown) => {
+              // `crypto.subtle` is missing outside a secure context, which is a
+              // proxy serving the app over plain http and nothing else. Left
+              // unhandled it is an unhandled rejection per save; handled, the
+              // hook simply recognises none of its own writes, so a save the
+              // typing carried on through raises a conflict the reader clears
+              // with `:w`. Wrong in the direction that writes nothing.
+              if (!(error instanceof TypeError)) throw error;
+            },
+          ),
         );
         // Typing during the write leaves newer text behind us, and that is not
         // saved however this one went. The cache waits on the same test: the
@@ -149,7 +175,7 @@ export function useAutosave(path: string | undefined) {
         return false;
       },
     );
-  }, [path, queryClient]);
+  }, [path, queryClient, track]);
 
   /**
    * Write what is waiting on the way to doing something else, refusing while
@@ -162,7 +188,8 @@ export function useAutosave(path: string | undefined) {
    * reader's behalf. `false` leaves the command undone.
    */
   const saveFirst = useCallback(
-    (): Promise<boolean> => (conflicted.current ? Promise.resolve(false) : save()),
+    (): Promise<boolean> =>
+      conflicted.current || holding.current > 0 ? Promise.resolve(false) : save(),
     [save],
   );
 
@@ -195,9 +222,10 @@ export function useAutosave(path: string | undefined) {
    *
    * A reading off the ref rather than off `status`: everything the route builds
    * out of this would take `status` into its dependencies, and one of those is
-   * the command table the editor's memo is keyed on.
+   * the command table the editor's memo is keyed on. A held event counts: the
+   * keys that refuse here go on to flush the buffer over whatever it was.
    */
-  const isConflicted = useCallback(() => conflicted.current, []);
+  const isConflicted = useCallback(() => conflicted.current || holding.current > 0, []);
 
   /**
    * Whether text for `note` is already on its way to the vault.
@@ -223,19 +251,22 @@ export function useAutosave(path: string | undefined) {
     (note: string, content: string) => {
       if (note !== path) return;
 
-      void digestOf(content).then(
-        (digest) => {
-          adopted.current.set(digest, content);
-        },
-        (error: unknown) => {
-          // `crypto.subtle` missing outside a secure context, the way the save
-          // path reads the same failure. Wrong in the direction that costs a
-          // conflict the reader clears with `:w`.
-          if (!(error instanceof TypeError)) throw error;
-        },
+      adoptedText.current.add(content);
+      track(
+        digestOf(content).then(
+          (digest) => {
+            adopted.current.set(digest, content);
+          },
+          (error: unknown) => {
+            // `crypto.subtle` missing outside a secure context, the way the save
+            // path reads the same failure. Wrong in the direction that costs a
+            // conflict the reader clears with `:w`.
+            if (!(error instanceof TypeError)) throw error;
+          },
+        ),
       );
     },
-    [path],
+    [path, track],
   );
 
   const change = useCallback(
@@ -247,7 +278,7 @@ export function useAutosave(path: string | undefined) {
       if (!conflicted.current) setStatus("unsaved");
       if (timer.current) clearTimeout(timer.current);
       timer.current = setTimeout(() => {
-        if (!conflicted.current) void save();
+        if (!conflicted.current && holding.current === 0) void save();
       }, QUIET_MS);
     },
     [save],
@@ -271,7 +302,7 @@ export function useAutosave(path: string | undefined) {
     // A write the route made into this note, reaching the editor through the
     // cache. Refused the way our own answer is, and for the same reason: it
     // carries no words the reader has not got.
-    for (const held of adopted.current.values()) if (held === text) return false;
+    if (adoptedText.current.has(text)) return false;
 
     conflicted.current = true;
     setStatus("conflict");
@@ -283,23 +314,56 @@ export function useAutosave(path: string | undefined) {
    * caller should reload: false means the buffer is dirty and now conflicted,
    * or the write was this hook's own and there is nothing to do.
    */
-  const reconcile = useCallback((digest: string | null): boolean => {
-    // Our own write coming back. Every write is reported, this hook's included,
-    // and reading one as somebody else's would flag a conflict on every save
-    // the typing carried on through.
-    if (digest !== null && digest === lastWritten.current) return false;
-    // A write the route made, coming back off the stream. The entry goes with
-    // it: one event answers one write.
-    if (digest !== null && adopted.current.delete(digest)) return false;
-    if (pending.current === null) return true;
+  const reconcile = useCallback(
+    (digest: string | null): boolean => {
+      // Our own write coming back. Every write is reported, this hook's included,
+      // and reading one as somebody else's would flag a conflict on every save
+      // the typing carried on through. Then a write the route made, coming back
+      // off the stream, whose entry goes with it: one event answers one write.
+      const ours = (of: string): boolean => {
+        if (of === lastWritten.current) return true;
+        const held = adopted.current.get(of);
+        if (held === undefined) return false;
+        adopted.current.delete(of);
+        adoptedText.current.delete(held);
+        return true;
+      };
+      if (digest !== null && ours(digest)) return false;
+      if (pending.current === null) return true;
 
-    // Nothing is discarded and nothing is written. The buffer keeps the
-    // reader's text, the vault keeps the other writer's, and `:w` is how the
-    // reader says which one wins.
-    conflicted.current = true;
-    setStatus("conflict");
-    return false;
-  }, []);
+      // Nothing is discarded and nothing is written. The buffer keeps the
+      // reader's text, the vault keeps the other writer's, and `:w` is how the
+      // reader says which one wins.
+      const conflict = () => {
+        conflicted.current = true;
+        setStatus("conflict");
+      };
+      if (digest === null || hashing.current.size === 0) {
+        conflict();
+        return false;
+      }
+      // One of our digests is still out and may be this one, so the autosave is
+      // held until it is in. A `:w` or a `:e!` in the meantime settled it the
+      // way a conflict would have been settled, so there is nothing to flag.
+      holding.current += 1;
+      const at = saves.current;
+      void Promise.allSettled(hashing.current).then(() => {
+        holding.current -= 1;
+        if (!ours(digest)) {
+          if (saves.current === at && pending.current !== null) conflict();
+          return;
+        }
+        // Ours after all: carry on with the write the hold kept back.
+        if (holding.current > 0 || conflicted.current || pending.current === null) return;
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(() => {
+          if (!conflicted.current && holding.current === 0) void save();
+        }, QUIET_MS);
+      });
+      return false;
+    },
+    [save],
+  );
 
   // React runs a cleanup with the render's own closure, so opening another
   // note writes what is pending to the note it was typed into, not to the one

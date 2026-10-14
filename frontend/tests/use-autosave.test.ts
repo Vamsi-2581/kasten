@@ -534,6 +534,87 @@ describe("useAutosave", () => {
     expect(note.status()).toBe("unsaved");
   });
 
+  it("takes the write through the editor before its digest has landed", () => {
+    // The route moves the cache straight after `adopt`, and the cache notifies
+    // on a zero-delay timer, which on a loaded machine runs before
+    // `crypto.subtle` answers. The editor's question is about text, so nothing
+    // here waits on the digest.
+    const note = renderAutosave();
+    const bookmark = "the index note\nreading: epubcfi(/6/4)";
+
+    note.change("# edited");
+    note.adopt("index.md", bookmark);
+
+    expect(note.allowReload(bookmark)).toBe(false);
+    expect(note.status()).toBe("unsaved");
+  });
+
+  it("takes the write off the stream before its digest has landed", async () => {
+    // The event carries a digest, which `adopt` only has once `crypto.subtle`
+    // answers. An event arriving inside that wait is answered when it does.
+    const note = renderAutosave();
+    const bookmark = "the index note\nreading: epubcfi(/6/4)";
+    const digest = await digestOf(bookmark);
+
+    note.change("# edited");
+    note.adopt("index.md", bookmark);
+
+    expect(note.reconcile(digest)).toBe(false);
+    expect(note.status()).toBe("unsaved");
+    // Queued behind adopt's own digest of the same text, so by now it is in.
+    await digestOf(bookmark);
+    await hashed();
+    expect(note.status()).toBe("unsaved");
+  });
+
+  it("still flags somebody else's write that arrives while a digest is out", async () => {
+    const note = renderAutosave();
+    // Taken before `adopt`, so its own digest is still out when the event lands.
+    const other = await digestOf("somebody else's text");
+
+    note.change("# edited");
+    note.adopt("index.md", "the index note\nreading: epubcfi(/6/4)");
+
+    expect(note.reconcile(other)).toBe(false);
+    expect(note.status()).toBe("unsaved");
+    await vi.waitFor(() => expect(note.status()).toBe("conflict"));
+  });
+
+  it("writes nothing over a write it cannot place yet", async () => {
+    // Until the digests are in, the event may be somebody else's, and a save
+    // now would overwrite it with no conflict ever shown. Held the way a
+    // conflict holds: a key that saves first refuses, and the timer waits.
+    const note = renderAutosave();
+    const other = await digestOf("somebody else's text");
+
+    note.change("# edited");
+    note.adopt("index.md", "the index note\nreading: epubcfi(/6/4)");
+    note.reconcile(other);
+
+    expect(await note.saveFirst()).toBe(false);
+    await idle();
+    expect(saveNote).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(note.status()).toBe("conflict"));
+  });
+
+  it("saves as it would have once the held write turns out to be its own", async () => {
+    const note = renderAutosave();
+    const bookmark = "the index note\nreading: epubcfi(/6/4)";
+    const digest = await digestOf(bookmark);
+
+    note.change("# edited");
+    note.adopt("index.md", bookmark);
+    note.reconcile(digest);
+    await idle();
+    expect(saveNote).not.toHaveBeenCalled();
+
+    await vi.waitFor(async () => {
+      await idle();
+      expect(saveNote).toHaveBeenCalledWith("index.md", "# edited");
+    });
+    expect(note.status()).not.toBe("conflict");
+  });
+
   it("still knows its own write when a bookmark lands between it and its event", async () => {
     // What fails when the adopted write shares `lastWritten`: the hook reads
     // its own save as somebody else's and locks the editor, which is the exact

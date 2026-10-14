@@ -449,6 +449,75 @@ def test_parks_a_card_whose_back_adds_nothing() -> None:
     assert as_note(decks[0]) == "#flashcards/French\n\nalone::\n"
 
 
+def test_writes_a_question_holding_the_divider_over_three_lines() -> None:
+    # A card line splits at its first `::`, so on one line this question would
+    # read back as `What does std`. `frontend/tests/srs.test.ts` and
+    # `review.test.ts` read this exact text back.
+    decks = read_apkg(apkg(((1, BASIC, "What does std::move do?\x1fcasts to an rvalue"),)))
+
+    assert as_note(decks[0]) == (
+        "#flashcards/French\n\nWhat does std::move do?\n?\ncasts to an rvalue\n"
+    )
+
+
+def test_sets_a_question_holding_the_divider_apart_from_its_neighbours() -> None:
+    template = Template("Card 1", "{{Front}}", "{{Back}}")
+    pairs = (("a", "b"), ("What does std::move do?", "casts std::move"), ("c", "d"))
+    deck = Deck("x", [Card(f, b, {}, template, "Basic", cloze=False) for f, b in pairs], 0)
+
+    assert as_note(deck) == (
+        "#flashcards/x\n\na::b\n\nWhat does std::move do?\n?\ncasts std::move\n\nc::d\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("front", "back"),
+    [
+        ("Is a::b valid?", "?"),
+        ("What does std::size count?", "# of elements"),
+        ("What opens a::b?", "#pragma"),
+        ("What does a::b hold?", "!suspended x"),
+        ("When is a::b due?", "on <!--SR:!2026-08-20,4,270--> here"),
+        ("# What does std::move do?", "casts"),
+    ],
+    ids=["divider", "heading", "tags", "token", "schedule", "front-heading"],
+)
+def test_leaves_out_a_divider_question_whose_side_would_end_the_card(front: str, back: str) -> None:
+    # `srs.ts` would drop the `?` card and read the front at its first `::`, or,
+    # for a `?` answer, `review.ts` would count the answer as a second card.
+    # `frontend/tests/review.test.ts` reads the first case's text back.
+    template = Template("Card 1", "{{Front}}", "{{Back}}")
+    pairs = ((front, back), ("a", "b"))
+    deck = Deck("x", [Card(f, b, {}, template, "Basic", cloze=False) for f, b in pairs], 0)
+
+    assert as_note(deck) == "#flashcards/x\n\na::b\n"
+
+
+@pytest.mark.parametrize(
+    ("front", "back"),
+    [
+        ("How is a::b scheduled?", "as <!--SR:!date,int,ease-->"),
+        ("Is <!--SR:!2026-08-20,4,270--> a::b?", "yes"),
+    ],
+    ids=["back-schedule-text", "front-schedule"],
+)
+def test_keeps_a_divider_question_holding_what_is_no_schedule_stop(front: str, back: str) -> None:
+    # `srs.ts` stops a back only at a whole schedule comment, and a front at no
+    # schedule at all, so neither of these ends the card.
+    template = Template("Card 1", "{{Front}}", "{{Back}}")
+    deck = Deck("x", [Card(front, back, {}, template, "Basic", cloze=False)], 0)
+
+    assert as_note(deck) == f"#flashcards/x\n\n{front}\n?\n{back}\n"
+
+
+def test_leaves_out_a_question_holding_the_divider_with_no_answer() -> None:
+    template = Template("Card 1", "{{Front}}", "{{Back}}")
+    pairs = (("What does std::move do?", ""), ("a", "b"))
+    deck = Deck("x", [Card(f, b, {}, template, "Basic", cloze=False) for f, b in pairs], 0)
+
+    assert as_note(deck) == "#flashcards/x\n\na::b\n"
+
+
 def test_script_and_style_add_no_text() -> None:
     notes = ((1, COND, "F1<style>.x{}</style>\x1fB1\x1f"),)
 
@@ -654,6 +723,21 @@ async def test_import_writes_one_note_per_deck(client: AsyncClient, vault: Path)
     assert "What is S3?::Simple Storage" in written
 
 
+async def test_import_counts_the_cards_the_note_holds(client: AsyncClient, vault: Path) -> None:
+    # The first cannot be written without `srs.ts` cutting it at `std`, so the
+    # note leaves it out, and the count must not promise it.
+    export = apkg(
+        notes=((1, BASIC, "What does std::size count?\x1f# of elements"), (2, BASIC, "a\x1fb")),
+        cards=((1, 1, 10, 0), (2, 2, 10, 0)),
+        decks=((10, "Cpp"),),
+    )
+
+    response = await client.post("/api/anki", content=export)
+
+    assert response.json()["cards"] == 1
+    assert "a::b" in (vault / "03 Flashcards" / "Cpp.md").read_text(encoding="utf-8")
+
+
 async def test_import_says_how_much_media_it_dropped(client: AsyncClient, vault: Path) -> None:
     export = apkg(
         notes=((1, BASIC, '<img src="cat.jpg"> which cat?\x1fthe tabby'),),
@@ -710,3 +794,37 @@ async def test_import_writes_no_block_into_a_reserved_name(
     await client.post("/api/anki", content=export)
 
     assert "---" not in (vault / "03 Flashcards" / "index.md").read_text(encoding="utf-8")
+
+
+def legacy_collection(decks: str, flds: object) -> bytes:
+    """An old-schema export holding one note whose fields are `flds`, of whatever type."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "collection"
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE notes (id, mid, flds)")
+            db.execute("CREATE TABLE cards (id, nid, did, ord)")
+            db.execute("CREATE TABLE col (decks, models)")
+            db.execute("INSERT INTO notes VALUES (1, 1, ?)", (flds,))
+            db.execute("INSERT INTO cards VALUES (1, 1, 1, 0)")
+            db.execute("INSERT INTO col VALUES (?, ?)", (decks, legacy_type()))
+        db.close()
+        return zipped("collection.anki2", path.read_bytes())
+
+
+@pytest.mark.parametrize(
+    "export",
+    [
+        zipped("collection.anki21b", b"junk"),
+        legacy_collection('{"1": {}}', "a"),
+        legacy_collection('{"1": {"name": "D"}}', b"a\x1fb"),
+    ],
+    ids=["anki21b-not-zstd", "deck-without-name", "flds-blob"],
+)
+async def test_import_refuses_an_export_it_cannot_read(
+    client: AsyncClient, vault: Path, export: bytes
+) -> None:
+    response = await client.post("/api/anki", content=export)
+
+    assert response.status_code == 400
+    assert "unreadable" in response.json()["detail"]
+    assert not (vault / "03 Flashcards").exists()
