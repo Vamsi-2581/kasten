@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NotePreview } from "@/components/note-preview";
 import { fetchNote, saveNote } from "@/lib/api";
+import { soundsIn } from "@/lib/audio";
 import { readClock } from "@/lib/clock";
 import { inDeck } from "@/lib/deck-tag";
 import { noteBody } from "@/lib/note-frontmatter";
@@ -69,8 +70,28 @@ interface ReviewSessionProps {
       rate: (rating: Rating) => void;
       suspend: () => void;
       capture: () => void;
+      replay: () => void;
     } | null,
   ) => void;
+}
+
+/**
+ * Start a sound, letting a refusal go by in silence.
+ *
+ * A phone refuses a sound no tap asked for, which is the first card of every
+ * sitting, and a sound whose source changed under it while it loaded rejects
+ * as aborted. Neither is worth a word on the screen: the Replay button is
+ * right there. A file that cannot play, deleted from the vault or in a format
+ * the browser lacks, never ends, so `skip` moves on to the side's next sound
+ * the way `ended` would. Those three are every way the spec lets `play()`
+ * reject; anything else is a fault and goes on up.
+ */
+function start(player: HTMLAudioElement, skip: () => void): void {
+  player.play().catch((error: unknown) => {
+    if (!(error instanceof DOMException)) throw error;
+    if (error.name === "NotSupportedError") skip();
+    else if (error.name !== "NotAllowedError" && error.name !== "AbortError") throw error;
+  });
 }
 
 /** One card in the sitting: which note holds it, and which of that note's cards. */
@@ -154,6 +175,81 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
   // A whole note has nothing hidden to show, so it is shown from the start and
   // the four ratings are the only thing its footer ever draws.
   const shown = revealed || card?.back === "";
+  const sounds = useMemo(
+    () => (card === undefined ? [] : soundsShowing(card, revealed)),
+    [card, revealed],
+  );
+
+  /**
+   * The one player of the sitting, made on the first sound and kept.
+   *
+   * One element reused rather than one per card, and never the player the
+   * preview draws: a phone lets an element play without a tap once a tap has
+   * started it, which is what lets the second of two sounds follow the first.
+   */
+  const player = useRef<HTMLAudioElement | null>(null);
+  /** The sounds of the side showing that wait behind the one playing. */
+  const waiting = useRef<string[]>([]);
+  /** The sound the player is on, or null once a side has run out or stopped. */
+  const current = useRef<string | null>(null);
+  /** Whether the card the deck read put on screen has been played. */
+  const started = useRef(false);
+
+  /**
+   * Go on from the sound `from` to the next one waiting, on its end or failure.
+   *
+   * Only from the sound the player is still on: a missing file both rejects
+   * its `play()` and fires `error`, and the second of those must not skip the
+   * sound the first one moved on to.
+   */
+  const onward = useCallback((from: string | null) => {
+    const made = player.current;
+    if (made === null || from === null || from !== current.current) return;
+    const next = waiting.current.shift() ?? null;
+    current.current = next;
+    if (next === null) return;
+    made.src = next;
+    start(made, () => onward(next));
+  }, []);
+
+  /**
+   * Play a side's sounds in order, stopping whatever was playing.
+   *
+   * Called from inside the tap or key that turned the card wherever there is
+   * one, because a phone refuses `play()` that does not start synchronously in
+   * a gesture. An empty list is the stop.
+   */
+  const play = useCallback(
+    (sources: string[]) => {
+      // Cleared before the pause, so a sound ending under it plays nothing next.
+      waiting.current = sources.slice(1);
+      const first = sources[0] ?? null;
+      current.current = first;
+      player.current?.pause();
+      if (first === null) return;
+      if (player.current === null) {
+        const made = document.createElement("audio");
+        made.addEventListener("ended", () => onward(current.current));
+        made.addEventListener("error", () => onward(current.current));
+        player.current = made;
+      }
+      player.current.src = first;
+      start(player.current, () => onward(first));
+    },
+    [onward],
+  );
+
+  // The first card is the one no tap shows: it lands when the deck read does.
+  // A phone refuses it, silently, and Replay is the tap that plays it there.
+  // Every card after it is played by the tap that rated or parked the last.
+  useEffect(() => {
+    if (card === undefined || started.current) return;
+    started.current = true;
+    play(soundsShowing(card, false));
+  }, [card, play]);
+
+  // Off with the sitting, so a sound never runs on over the deck list.
+  useEffect(() => () => player.current?.pause(), []);
 
   const rate = useCallback(
     (rating: Rating) => {
@@ -172,6 +268,11 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
       // is the one place the session disagrees with the schedule it just wrote:
       // the note says tomorrow, and today's sitting asks once more.
       setQueue((held_) => (rating === "again" ? [...held_.slice(1), seat] : held_.slice(1)));
+      // The card the queue above puts up, played here because this is the tap.
+      // `again` on the last card puts the same one up, and Anki asks it aloud.
+      const coming = rating === "again" && queue.length === 1 ? seat : queue[1];
+      const following = coming === undefined ? undefined : cards.get(coming.note)?.[coming.at];
+      play(following === undefined ? [] : soundsShowing(following, false));
 
       void saveNote(seat.note, next).then(
         () => {
@@ -186,7 +287,7 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
         },
       );
     },
-    [cards, deck, queryClient, seat, texts, today],
+    [cards, deck, play, queryClient, queue, seat, texts, today],
   );
 
   /**
@@ -211,6 +312,9 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
     setRevealed(false);
     setTyped("");
     setQueue((queued) => queued.slice(1));
+    const coming = queue[1];
+    const following = coming === undefined ? undefined : cards.get(coming.note)?.[coming.at];
+    play(following === undefined ? [] : soundsShowing(following, false));
 
     void saveNote(seat.note, next).then(
       () => {
@@ -223,7 +327,7 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
         setFailed(error instanceof Error ? error.message : "could not write the note");
       },
     );
-  }, [cards, deck, queryClient, seat, texts]);
+  }, [cards, deck, play, queryClient, queue, seat, texts]);
 
   /**
    * Write what was jotted at the end of the note the card on screen came from.
@@ -274,7 +378,12 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
 
   const reveal = useCallback(() => {
     setRevealed(true);
-  }, []);
+    // Once, on the turn: a second space on an answer already showing is not a
+    // request to hear it again, `r` and Replay being that.
+    if (card !== undefined && !shown) play(soundsIn(card.back));
+  }, [card, play, shown]);
+
+  const replay = useCallback(() => play(sounds), [play, sounds]);
 
   const toggleTyping = useCallback(() => {
     setTyping((on) => {
@@ -284,13 +393,13 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
   }, []);
 
   useEffect(() => {
-    onControls?.(card === undefined ? null : { reveal, rate, suspend, capture });
+    onControls?.(card === undefined ? null : { reveal, rate, suspend, capture, replay });
     return () => onControls?.(null);
-  }, [capture, card, onControls, rate, reveal, suspend]);
+  }, [capture, card, onControls, rate, replay, reveal, suspend]);
 
   return (
     <div className="flex h-full flex-col bg-one-bg font-mono text-one-fg">
-      {/* Six things share this row, and at a phone's width the gaps between
+      {/* Seven things share this row, and at a phone's width the gaps between
           them are what the deck's name is squeezed out by. */}
       <header className="flex items-center gap-3 border-one-line border-b px-3 py-2 max-md:gap-1">
         <button
@@ -304,6 +413,17 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
         <span className="text-[11px] text-one-muted uppercase tracking-wider">
           {queue.length} left
         </span>
+        {/* The phone's `r`, and the only way to hear a first card a phone
+            refused to play unasked. Drawn while the side showing has a sound. */}
+        {sounds.length > 0 && (
+          <button
+            type="button"
+            onClick={replay}
+            className="min-h-11 px-2 text-[11px] text-one-muted uppercase tracking-wider hover:text-one-accent pointer-coarse:min-w-11"
+          >
+            Replay
+          </button>
+        )}
         {/* Beside Type and before the reveal, because a card you want out of
             the deck is one you have recognised from its question alone. */}
         {card !== undefined && (
@@ -464,6 +584,16 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
       )}
     </div>
   );
+}
+
+/**
+ * The sounds of the side of a card on screen, its back once that is turned.
+ *
+ * A whole note keeps its sounds in the front, its back being empty, so it is
+ * the front that plays however the reveal was pressed.
+ */
+function soundsShowing(card: Card, revealed: boolean): string[] {
+  return soundsIn(revealed && card.back !== "" ? card.back : card.front);
 }
 
 /** Whether the card is one today's sitting should ask. */
