@@ -27,7 +27,7 @@ export interface Held {
  * or a reload sees what the last page left.
  */
 let store: Map<string, Held> | null = null;
-let snapshot: { path: string; reason: string }[] = [];
+let snapshot: { path: string; reason: string; conflicted: boolean }[] = [];
 const listeners = new Set<() => void>();
 /** Whether storage refused the last write, leaving the map ahead of it. */
 let unwritten = false;
@@ -101,7 +101,12 @@ function load(): Map<string, Held> {
 }
 
 function list(held: Map<string, Held>) {
-  return [...held].map(([path, { reason }]) => ({ path, reason }));
+  // `=== true` because an entry another build wrote may lack the field.
+  return [...held].map(([path, { reason, conflicted }]) => ({
+    path,
+    reason,
+    conflicted: conflicted === true,
+  }));
 }
 
 function changed(held: Map<string, Held>): void {
@@ -135,6 +140,28 @@ export function dropText(path: string): void {
   changed(held);
 }
 
+/**
+ * Carry held text along a move, `to` answering each path's new one or nothing.
+ *
+ * The map is keyed by path, so text held for a note that is then moved would
+ * stay listed under a path the vault no longer has, and opening the note at
+ * its new one would never offer it again.
+ */
+export function moveHeld(to: (path: string) => string | undefined): void {
+  const held = sync();
+  let moved = false;
+  for (const [path, entry] of [...held]) {
+    const next = to(path);
+    // Never over text already held at the new path: both stay listed, each
+    // still to be dealt with, rather than one lost without a word.
+    if (next === undefined || next === path || held.has(next)) continue;
+    held.delete(path);
+    held.set(next, entry);
+    moved = true;
+  }
+  if (moved) changed(held);
+}
+
 export function heldText(path: string): Held | undefined {
   return load().get(path);
 }
@@ -163,8 +190,11 @@ function current() {
   return snapshot;
 }
 
-/** Every held note and why, re-rendering when one is held or let go. */
-export function useHeld(): readonly { path: string; reason: string }[] {
+/**
+ * Every held note, why, and whether it was left standing conflicted rather
+ * than refused, re-rendering when one is held or let go.
+ */
+export function useHeld(): readonly { path: string; reason: string; conflicted: boolean }[] {
   return useSyncExternalStore(subscribe, current);
 }
 
@@ -187,7 +217,8 @@ export function sameText(a: string, b: string): boolean {
   return unstamped(a) === unstamped(b);
 }
 
-function unstamped(text: string): string {
+/** `text` without its frontmatter's `modified` line, which every write restamps. */
+export function unstamped(text: string): string {
   if (!text.startsWith("---\n")) return text;
   const end = text.indexOf("\n---", 4);
   if (end === -1) return text;
