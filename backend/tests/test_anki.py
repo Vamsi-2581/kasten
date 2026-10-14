@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from kasten_backend import main
-from kasten_backend.anki import Card, Deck, Template, as_note, plain, read_apkg
+from kasten_backend.anki import Card, Deck, Template, as_note, card_count, plain, read_apkg
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -272,12 +272,33 @@ def test_plain_drops_an_image_and_a_sound() -> None:
     assert plain('<img src="cat.jpg"> a cat [sound:meow.mp3] purring') == "a cat purring"
 
 
-def test_plain_turns_a_cloze_into_a_highlight() -> None:
+def test_plain_keeps_a_cloze_mark_only_for_a_cloze_note() -> None:
+    # Anki shows the marks of a note that is not a cloze type as typed, and a
+    # mark kept there would make kasten ask a card Anki never did.
     assert plain("{{c1::Paris}} is the capital") == "==Paris== is the capital"
+    assert plain("{{c1::Paris}} is the capital", cloze=True) == "{{c1::Paris}} is the capital"
 
 
-def test_plain_drops_a_cloze_hint() -> None:
-    assert plain("{{c1::Paris::city}} is the capital") == "==Paris== is the capital"
+def test_plain_keeps_a_cloze_hint_for_a_cloze_note() -> None:
+    field = "{{c1::Paris::a city}} is in {{c2::<b>France</b>}}"
+
+    assert plain(field) == "==Paris== is in ==France=="
+    assert plain(field, cloze=True) == "{{c1::Paris::a city}} is in {{c2::France}}"
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        (r"{{c1::\(x^{2}\)}} is the square", r"==\(x^{2}\)== is the square"),
+        ("{{c1::}} x", "==== x"),
+        (r"{{c1::\(x^{2}\)}} is {{c2::the square}}", r"==\(x^{2}\)== is {{c2::the square}}"),
+    ],
+    ids=["brace", "empty", "mixed"],
+)
+def test_plain_highlights_a_cloze_mark_kasten_cannot_read(field: str, expected: str) -> None:
+    # `MARK` in `card-line.ts` takes no brace and no empty text, and a mark it
+    # does not read would leave its `::` to split the line.
+    assert plain(field, cloze=True) == expected
 
 
 def test_plain_answers_with_one_line() -> None:
@@ -447,14 +468,90 @@ def test_filters_show_the_field_named_last_and_the_rest_nothing(layout: dict[str
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
-def test_a_cloze_note_gives_one_card_of_its_first_two_fields(layout: dict[str, Any]) -> None:
-    notes = ((1, CLOZE, "{{c1::Paris}} is in {{c2::France}}\x1f"),)
+def test_a_cloze_note_imports_as_one_cloze_line(layout: dict[str, Any]) -> None:
+    # One line however many card rows, since kasten asks one card per number
+    # from it; with no Back Extra it is the line alone, and no `::` after it.
+    notes = ((1, CLOZE, "{{c1::Paris}} is in {{c2::France::a country}}\x1f"),)
     cards = ((11, 1, 200, 1), (12, 1, 100, 0))
 
     decks = read_apkg(apkg(notes, cards, **layout))
 
-    assert sides(decks) == {"French": [("==Paris== is in ==France==", "")]}
-    assert as_note(decks[0]) == "#flashcards/French\n\n==Paris== is in ==France==::\n"
+    assert sides(decks) == {"French": [("{{c1::Paris}} is in {{c2::France::a country}}", "")]}
+    assert as_note(decks[0]) == (
+        "#flashcards/French\n\n{{c1::Paris}} is in {{c2::France::a country}}\n"
+    )
+
+
+def test_a_cloze_without_back_extra_is_kept_on_a_line_of_its_own() -> None:
+    template = Template("Cloze", "{{cloze:Text}}", "{{cloze:Text}}")
+    deck = Deck(
+        "x",
+        [
+            Card("a", "b", {}, template, "Basic", cloze=False),
+            Card("Ratio {{c1::1}}:", "", {}, template, "Cloze", cloze=True),
+            Card("c", "d", {}, template, "Basic", cloze=False),
+        ],
+        {},
+    )
+
+    assert as_note(deck) == "#flashcards/x\n\na::b\nRatio {{c1::1}}:\nc::d\n"
+
+
+def test_a_cloze_note_with_back_extra_imports_as_the_question_form() -> None:
+    notes = (
+        (1, BASIC, "Bonjour\x1fhello"),
+        (2, CLOZE, "{{c1::Paris}} is the capital\x1fOn the <b>Seine</b>"),
+        (3, BASIC, "Oui\x1fyes"),
+    )
+    cards = ((11, 1, 100, 0), (21, 2, 100, 0), (31, 3, 100, 0))
+
+    decks = read_apkg(apkg(notes, cards, ((100, "French"),)))
+
+    assert as_note(decks[0]) == (
+        "#flashcards/French\n\nBonjour::hello\n\n"
+        "{{c1::Paris}} is the capital\n?\nOn the Seine\n\nOui::yes\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["# of rivers", "#geography", "!suspended x", "?", "<!--SR:!2026-08-20,4,270-->"],
+    ids=["heading", "tags", "token", "divider", "schedule"],
+)
+def test_a_cloze_whose_back_extra_would_end_the_card_keeps_the_cloze(extra: str) -> None:
+    # Under a `?` these would end the card or count as one, and unlike a
+    # question holding `::` a cloze has a line of its own to fall back on.
+    template = Template("Cloze", "{{cloze:Text}}", "{{cloze:Text}}")
+    deck = Deck("x", [Card("{{c1::Paris}} is it", extra, {}, template, "Cloze", cloze=True)], {})
+
+    assert as_note(deck) == "#flashcards/x\n\n{{c1::Paris}} is it\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "body"),
+    [
+        (r"{{c1::\(x^{2}\)}} is the square", r"==\(x^{2}\)== is the square::extra"),
+        ("{{c1::}} x", "==== x::extra"),
+        (r"{{c1::\(x^{2}\)}} is {{c2::it}}", r"==\(x^{2}\)== is {{c2::it}}" + "\n?\nextra"),
+    ],
+    ids=["brace", "empty", "mixed"],
+)
+def test_a_cloze_mark_kasten_cannot_read_imports_as_a_highlight(text: str, body: str) -> None:
+    # With no mark left the note is a card like any other; with one, the line
+    # is a cloze of the marks kasten reads, so each case is one card.
+    notes = ((1, CLOZE, f"{text}\x1fextra"),)
+    deck = read_apkg(apkg(notes, CARDS[:1], ((100, "x"),)))[0]
+
+    assert as_note(deck) == f"#flashcards/x\n\n{body}\n"
+    assert card_count(deck) == 1
+
+
+def test_a_cloze_note_with_no_marks_is_a_card_of_its_two_fields() -> None:
+    # Anki will not save such a note, but a broken export can hold one; its
+    # text is still worth a question.
+    decks = read_apkg(apkg(((1, CLOZE, "Paris\x1fthe capital"),), CARDS[:1], ((100, "x"),)))
+
+    assert as_note(decks[0]) == "#flashcards/x\n\nParis::the capital\n"
 
 
 def test_writes_a_deck_as_a_tagged_note() -> None:
@@ -878,6 +975,19 @@ async def test_import_counts_the_cards_the_note_holds(client: AsyncClient, vault
 
     assert response.json()["cards"] == 1
     assert "a::b" in (vault / "03 Flashcards" / "Cpp.md").read_text(encoding="utf-8")
+
+
+async def test_import_counts_each_cloze_number_as_a_card(client: AsyncClient, vault: Path) -> None:
+    # One line, and the review asks it once as `c1` and once as `c2`.
+    export = apkg(
+        notes=((1, CLOZE, "{{c1::H}}{{c1::O}} and {{c2::water}}\x1f"), (2, BASIC, "a\x1fb")),
+        cards=((1, 1, 10, 0), (2, 1, 10, 1), (3, 2, 10, 0)),
+        decks=((10, "Chem"),),
+    )
+
+    response = await client.post("/api/anki", content=export)
+
+    assert response.json()["cards"] == 3
 
 
 CAT_EXPORT = apkg(
