@@ -146,6 +146,20 @@ export function noteName(path: string): string {
 }
 
 /**
+ * A vault path spelled for a URL, or for a markdown destination that becomes one.
+ *
+ * `encodeURI` with the two characters it leaves raw that cut a URL short: `#`
+ * starts a fragment and `?` a query, so `plan #2.pdf` would ask for `plan `.
+ * Nothing more than those two, because notes keep the spelling `encodeURI`
+ * always wrote: the backend's move finds a link by that spelling, and a `,`
+ * written `%2C` would be a link a folder move misses. `%` itself is already
+ * `%25` by then, so the two added escapes are never read twice.
+ */
+export function encodePath(path: string): string {
+  return encodeURI(path).replaceAll("#", "%23").replaceAll("?", "%3F");
+}
+
+/**
  * The typed path with the slashes tidied.
  *
  * A vault path is relative and its separator is a single slash, so a doubled or
