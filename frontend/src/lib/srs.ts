@@ -40,8 +40,8 @@
  * Which decks a card is in is read here, off `deck-tag.ts`'s rule, because this
  * is the reader that sees the note whole. A `::` is a common enough thing to
  * type that reading every one of them as a card would fill the queue with C++
- * and YAML, so a card in no deck at all is not a card, and the overview counts
- * the same thing off the matched lines alone.
+ * and YAML, so a card in no deck at all is not a card, to the overview and the
+ * sitting alike.
  */
 
 import {
@@ -179,6 +179,20 @@ export function readSchedule(text: string, comment = SR): Schedule | null {
   return { due, interval: Number(interval), ease: Number(ease) };
 }
 
+/** A ruby's reading and the parentheses around it, which are no part of the word. */
+const READING = /<(rt|rp)\b[^>]*>.*?<\/\1>/g;
+
+/** Ruby's own tags, left once the reading has gone. */
+const RUBY_TAG = /<\/?ruby\b[^>]*>/g;
+
+/**
+ * `target` as somebody types it: an imported `<ruby>漢字<rt>かんじ</rt></ruby>`
+ * is the word `漢字`, the reading drawn over it being a hint and not the answer.
+ */
+function typedTarget(target: string): string {
+  return target.replace(READING, "").replace(RUBY_TAG, "");
+}
+
 /**
  * One card per number the cloze `line` holds, in ascending order.
  *
@@ -203,7 +217,7 @@ function clozeCards(
       decks: [],
       held: readSchedule(schedule, clozeComment(cloze)),
       cloze,
-      target: clozeTarget(text, cloze),
+      target: typedTarget(clozeTarget(text, cloze)),
     };
   });
 }

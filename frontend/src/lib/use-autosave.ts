@@ -6,7 +6,11 @@ import { digestOf } from "@/lib/vault-events";
 /** Long enough that a sentence is one write, short enough to forget about. */
 const QUIET_MS = 800;
 
-export type SaveStatus = "saved" | "unsaved" | "saving" | "error" | "conflict";
+/**
+ * `lost` is `error` for a note already left: the text went with the write, so
+ * there is nothing here for `:w` to try again with.
+ */
+export type SaveStatus = "saved" | "unsaved" | "saving" | "error" | "conflict" | "lost";
 
 /** One fewer write in the air for `note`, taking the entry when it reaches none. */
 function lower(counts: Map<string, number>, note: string): void {
@@ -49,6 +53,11 @@ export function useAutosave(path: string | undefined) {
   // timer can see it: that timer was scheduled by an older render, and the
   // status it closed over is the one from before the conflict.
   const conflicted = useRef(false);
+  // The reason this note's own last write failed, while its text waits for
+  // `:w`, and null otherwise. Read by a failed flush of the note left behind,
+  // whose closure holds a status from before: `lost` over this would take the
+  // way to retry off the bar while the retry still has text to write.
+  const failed = useRef<string | null>(null);
   // How many times the reader has thrown the buffer away, which a write in
   // flight compares against the reading it left with.
   //
@@ -135,17 +144,19 @@ export function useAutosave(path: string | undefined) {
     const sent = reverts.current;
     setStatus("saving");
     setReason(undefined);
+    failed.current = null;
     const to = path;
     const opened = visit.current;
     writing.current.set(to, (writing.current.get(to) ?? 0) + 1);
+    // The flush on the way out of a note answers here with that note's
+    // closure, after the hook already follows the next one: its slots, its
+    // status and its pending text are that one's, and its own event is dropped
+    // by the route anyway.
+    const here = () => visit.current === opened;
 
     return saveNote(path, content).then(
       (note) => {
         lower(writing.current, to);
-        // The flush on the way out of a note answers here with that note's
-        // closure, after the hook already follows the next one: its slots are
-        // that one's, and its own event is dropped by the route anyway.
-        const here = () => visit.current === opened;
         // The note that came back and never the text that was sent: the two
         // differ by the `modified` stamp `PUT` writes, so what is on disk is
         // this one. Hashing the other would recognise nothing and read every
@@ -180,7 +191,7 @@ export function useAutosave(path: string | undefined) {
         // putting this in the cache would hand it straight back to them.
         if (pending.current === null && reverts.current === sent) {
           queryClient.setQueryData(["note", path], note.content);
-          setStatus("saved");
+          if (here()) setStatus("saved");
         }
         return true;
       },
@@ -190,15 +201,36 @@ export function useAutosave(path: string | undefined) {
         // lowered under it would leak for the life of the page, leaving that
         // note reading as busy and never written to again.
         lower(writing.current, to);
+        const message = failure instanceof Error ? failure.message : String(failure);
+        // The flush of a note already left: `pending` now holds the next note's
+        // text, and a retry would write this one's into it. The text is lost,
+        // so the bar says which note lost it, that note no longer being on screen.
+        // Ahead of the revert check, because a `:e!` since then was on the next
+        // note and threw away that one's text, not this.
+        if (!here()) {
+          // A conflict on the next note outranks this: it holds every write
+          // back, and nothing would ever put the bar back on it.
+          // So does this note's own failed write, whose text `:w` can still
+          // send: both are named, and the bar keeps the way to retry.
+          const lost = `${to} was not saved: ${message}`;
+          if (failed.current !== null && pending.current !== null) {
+            setReason(`${failed.current}\n${lost}`);
+            return false;
+          }
+          if (!conflicted.current) setStatus("lost");
+          setReason(lost);
+          return false;
+        }
         // Nothing to hold and nothing to warn about once the reader has thrown
         // this text away: the buffer holds the vault's version, and the retry
         // would be a retry of an edit that no longer exists anywhere.
         if (reverts.current !== sent) return false;
 
+        setStatus("error");
         // Hold on to the text: the next keystroke or `:w` tries again.
         pending.current ??= content;
-        setStatus("error");
-        setReason(failure instanceof Error ? failure.message : String(failure));
+        failed.current = message;
+        setReason(message);
         return false;
       },
     );
@@ -238,6 +270,7 @@ export function useAutosave(path: string | undefined) {
 
     pending.current = null;
     conflicted.current = false;
+    failed.current = null;
     reverts.current += 1;
     setStatus("saved");
     setReason(undefined);
@@ -315,6 +348,8 @@ export function useAutosave(path: string | undefined) {
   const change = useCallback(
     (doc: string) => {
       pending.current = doc;
+      // The bar reads `unsaved` from here, not the failure.
+      if (!conflicted.current) failed.current = null;
       // Typing settles nothing while the note stands conflicted: the vault
       // still holds text this buffer never saw, and reading `unsaved` would
       // promise a write the timer below no longer makes.
