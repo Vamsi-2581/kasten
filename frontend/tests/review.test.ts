@@ -352,6 +352,22 @@ describe("decksFrom against the sitting", () => {
   });
 });
 
+describe("decksFrom on an imported deck carrying anki ids", () => {
+  const MARKED =
+    "#flashcards/aws\n\nWhat is S3?::Simple Storage <!--anki:1:0:0a1b2c3d--> <!--SR:!2026-08-01,1,250-->\n" +
+    "Not answered yet:: <!--anki:2:0:0a1b2c3d-->\n" +
+    "The capital is {{c1::Paris}}. <!--anki:3:0:0a1b2c3d-->\n\nFront\n?\nBack <!--anki:4:1:0a1b2c3d-->\n";
+
+  it("counts what the sitting asks, a card whose back is the id alone parked", () => {
+    const notes = one("aws.md", MARKED);
+    const [deck] = decksFrom(notes, TODAY);
+
+    expect(deck).toMatchObject({ due: 1, fresh: 2, parked: 1 });
+    expect(sitting(deck as Deck, notes)).toEqual({ due: 1, fresh: 2, parked: 1 });
+    expect(parkedNotes(hits("aws.md", MARKED.split("\n")))).toEqual(["aws.md"]);
+  });
+});
+
 describe("parkedNotes", () => {
   it("names the notes holding a parked line and leaves the others out", () => {
     const found = parkedNotes([

@@ -77,6 +77,10 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
   // the note just left: its text is still in flight while this hook has already
   // moved on, and nothing else on the route can see that write.
   const writing = useRef(new Map<string, number>());
+  // The last text sent to each note while any write to it is in the air. A
+  // write empties `pending` as it goes out, and a plain fetch is cancelled with
+  // the page, so this is the only copy a hide can find of a quiet write's text.
+  const inAir = useRef(new Map<string, string>());
   // What the route wrote into this note, by the digest the event will carry and
   // the text the cache will hold. Its own store rather than `lastWritten` and
   // `lastText`, which the hook's own writes overwrite: a bookmark landing
@@ -191,6 +195,11 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
       const to = path;
       const opened = visit.current;
       writing.current.set(to, (writing.current.get(to) ?? 0) + 1);
+      inAir.current.set(to, content);
+      const answered = () => {
+        lower(writing.current, to);
+        if (!writing.current.has(to)) inAir.current.delete(to);
+      };
       // The flush on the way out of a note answers here with that note's
       // closure, after the hook already follows the next one: its slots, its
       // status and its pending text are that one's, and its own event is dropped
@@ -209,7 +218,7 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
       // writer of a note makes.
       return (keepalive ? saveNote(path, content, true) : saveNote(path, content)).then(
         (note) => {
-          lower(writing.current, to);
+          answered();
           // The held entry goes when this write carried it: its own text, or
           // text typed on top of the entry the buffer had taken when this was
           // sent. An entry the buffer never showed, held by a flush that failed
@@ -221,8 +230,11 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
           }
           // What the buffer took is written now, so nothing on screen is held
           // text any more, and a second entry, if any, goes on the bar. Not when
-          // the buffer took newer text since.
-          if (here() && taken.current === carried) take(null);
+          // the buffer took newer text since. An entry a hide held of this very
+          // text while it was in the air is written now too.
+          if (here() && (taken.current === carried || taken.current?.content === content)) {
+            take(null);
+          }
           // The note that came back and never the text that was sent: the two
           // differ by the `modified` stamp `PUT` writes, so what is on disk is
           // this one. Hashing the other would recognise nothing and read every
@@ -266,14 +278,16 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
           // returns early on a write that failed after a `:e!`, and a count
           // lowered under it would leak for the life of the page, leaving that
           // note reading as busy and never written to again.
-          lower(writing.current, to);
+          answered();
           const message = failure instanceof Error ? failure.message : String(failure);
           const held = { content, reason: message, conflicted: wasConflicted, base };
           // An entry held after this went out holds newer text, the hide's,
           // which is on screen and on its own way out: this older text replaces
-          // neither it nor `pending`.
+          // neither it nor `pending`. An entry of this same text is the hide
+          // holding this write while it was in the air, and is its own.
           const existing = heldText(to);
-          if (existing && (heldAt.current.get(existing) ?? -1) >= seq) return false;
+          const newer = existing && existing.content !== content;
+          if (newer && (heldAt.current.get(existing) ?? -1) >= seq) return false;
           // Its own send count: a write sent after this one and failing first
           // holds newer text, which this must not replace either.
           heldAt.current.set(held, seq);
@@ -348,8 +362,13 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
       pending.current = null;
       conflicted.current = false;
       reverts.current += 1;
-      // The other way held text ends: the reader chose the vault's.
-      if (path !== undefined) dropText(path);
+      // The other way held text ends: the reader chose the vault's. A write
+      // still in the air carries text thrown away too, which a hide must not
+      // hold or send again.
+      if (path !== undefined) {
+        dropText(path);
+        inAir.current.delete(path);
+      }
       take(null);
       setStatus("saved");
       setReason(undefined);
@@ -619,11 +638,15 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
   useEffect(() => {
     if (path === undefined) return;
     const hide = () => {
-      if (pending.current === null) return;
-      if (pending.current === taken.current?.content) return;
+      // Nothing waiting, but a quiet write may still be in the air, and the page
+      // going away cancels it. Its text is held and sent again with keepalive,
+      // and the quiet write landing after all drops the held copy.
+      const content = pending.current ?? inAir.current.get(path);
+      if (content === undefined) return;
+      if (content === taken.current?.content) return;
       const stop = conflicted.current || holding.current > 0;
       const entry = {
-        content: pending.current,
+        content,
         reason: "Not yet written when the page was hidden",
         conflicted: conflicted.current,
         base: lastBase(path),
@@ -632,7 +655,11 @@ export function useAutosave(path: string | undefined, shown?: () => string | und
       // After every write already in the air, which a failing one reads.
       heldAt.current.set(entry, saves.current);
       take(entry);
-      if (!stop) void write(true);
+      if (stop) return;
+      // In `pending` only to be sent: a held in-flight text put there would
+      // outlive its own write landing, and leave the note reading unsaved.
+      pending.current = content;
+      void write(true);
     };
     const hidden = () => {
       if (document.visibilityState === "hidden") hide();

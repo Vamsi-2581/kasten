@@ -479,8 +479,42 @@ the raw request body, the way `POST /api/assets/{path}` takes a book, and
 answers 201 with what was written.
 
 ```json
-{ "notes": ["03 Flashcards/AWS.md"], "cards": 412, "media": 17 }
+{
+  "notes": ["03 Flashcards/AWS.md"],
+  "cards": 412, "media": 17,
+  "added": 5, "updated": 3, "kept": 380, "removed": 2
+}
 ```
+
+`notes` names every deck's note, written or not. `added`, `updated`, `kept` and
+`removed` count marker lines, so a cloze counts once there however many
+numbers it asks; `cards` counts each number. A first import counts every card
+as added.
+
+Every card ends in `<!--anki:NID:ORD:HASH-->` after its last line: its Anki note
+id, its template ord (a cloze's lowest), and the first 8 hex digits of the
+sha256 of the lines the import wrote for it. A rating writes its schedule after
+or under that marker and never touches it. When the deck's note already exists,
+the import merges into it by marker, and finds each card's lines as the ones
+ending at the marker whose hash matches:
+
+* A card whose text is what the import would write now is kept untouched.
+* A card whose lines no longer match the hash was edited in kasten, and is
+  kept untouched, counted as `kept`, whatever Anki now holds.
+* A card whose text Anki changed is written anew, its schedule comments and
+  `!suspended` token carried into its new shape.
+* A card the note lacks goes on the end.
+* A card the export lacks stays in the note and is counted as `removed`.
+* A line without a marker, the tag line, a card of your own, prose, comes
+  through byte for byte.
+* A note the merge would leave unchanged is not written at all.
+
+`?carry=true` writes Anki's schedule onto every card the import adds that
+Anki holds in review (card `type` 2): the due date is `col.crt` plus `due`
+days, the interval `ivl`, the ease `factor` divided by ten, as the
+`<!--SR:!…-->` a rating would write, one `<!--SR:cN!…-->` per number on a
+cloze. A card new or in learning in Anki gets none, and a card already in the
+note keeps kasten's schedule. Off by default.
 
 The export is read with `zipfile`, `sqlite3` and `compression.zstd`, all of them
 in the standard library on Python 3.14, so importing a deck adds no dependency.
@@ -540,12 +574,15 @@ such a file has nothing left to ask and is left out.
 * A deck name that would climb out of the flashcards folder answers 400.
 * A collection with no note types answers 400, because without templates there
   is nothing to make a card from.
-* A deck whose note already exists answers 409, and **nothing is written at
-  all**, not even the decks in the same export that would have been fine. Every
-  path is resolved and every collision found before the first write, because the
-  note it would land on may hold schedules you spent a month building.
-* A media file whose path is already taken answers 409 the same way, and
-  nothing is written.
+* A deck whose note already exists but holds no `<!--anki:NID:ORD:HASH-->` marker,
+  one imported before the cards carried their ids, answers 409, and **nothing
+  is written at all**, not even the decks in the same export that would have
+  been fine. Every path is resolved and every collision found before the first
+  write.
+* A media file whose path is already taken answers 409 the same way for a deck
+  imported the first time. A deck merged into its note keeps the file it finds
+  and does not count it.
+* With `carry`, a collection whose `col` row holds no creation time answers 400.
 * A body over 100MB answers 413.
 
 [Import an Anki deck](/how-to/import-an-anki-deck.md) is the runbook.
