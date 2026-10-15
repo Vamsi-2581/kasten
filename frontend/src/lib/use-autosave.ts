@@ -30,6 +30,11 @@ function lower(counts: Map<string, number>, note: string): void {
   else counts.delete(note);
 }
 
+/** How many times a clean buffer of `note` took the vault's text in. */
+function reloadsOf(reloads: Map<string, number>, note: string): number {
+  return reloads.get(note) ?? 0;
+}
+
 /**
  * Writes one note back to the vault as it is edited.
  *
@@ -90,8 +95,9 @@ export function useAutosave(
   const reverts = useRef(0);
   // How many times a clean buffer took the vault's text in, which a failing
   // write compares against the reading it left with: after one, the screen
-  // holds text not typed on the write's (#290).
-  const reloads = useRef(0);
+  // holds text not typed on the write's (#290). By note: a reload of the note
+  // opened next says nothing about the buffer a flush of this one left.
+  const reloads = useRef(new Map<string, number>());
   // The notes a write is on its way to, counted rather than flagged: `:w`
   // during a quiet write puts two in the air for one note, and the first to
   // answer must not read as the last. By path, because the tail this answers is
@@ -101,15 +107,24 @@ export function useAutosave(
   // The last text sent to each note while any write to it is in the air. A
   // write empties `pending` as it goes out, and a plain fetch is cancelled with
   // the page, so this is the only copy a hide can find of a quiet write's text.
-  const inAir = useRef(new Map<string, string>());
+  // With the `reloads` count it left with: after a reload, text typed on is
+  // typed on the reload's text, and not on this.
+  const inAir = useRef(new Map<string, { content: string; loaded: number }>());
   // The last write to each note still to answer, resolving with the text on
   // disk once it has, as far as this hook knows. The next write to that note
   // goes out behind it and names that text as its base: not the text the last
   // one sent, which `stamp` may have given a block, and which a write that
   // failed never put there. Only within the visit that made it: a flush from
   // the visit before lands text the buffer reopened without, and naming it
-  // would let this buffer over it unasked.
-  const queued = useRef(new Map<string, { link: Promise<string | undefined>; visit: number }>());
+  // would let this buffer over it unasked. Nor after a reload into the clean
+  // buffer since it went out: the next write was typed on the reload's text,
+  // and still goes out behind it, but names that text (#298).
+  const queued = useRef(
+    new Map<string, { link: Promise<string | undefined>; visit: number; loaded: number }>(),
+  );
+  // The notes whose outside write `reconcile` declined while a write to them
+  // was in the air, reloaded once the last of those writes answers (#296).
+  const missed = useRef(new Set<string>());
   // Bumped by every write that goes out, which orders held entries against
   // the writes that fail after them (`heldAt`).
   const saves = useRef(0);
@@ -175,19 +190,30 @@ export function useAutosave(
       saves.current += 1;
       const seq = saves.current;
       const sent = reverts.current;
-      const loaded = reloads.current;
+      const loaded = reloadsOf(reloads.current, path);
       setStatus("saving");
       setReason(undefined);
       const to = path;
+      // Whether this note's buffer took the vault's text in since this went out.
+      const reloaded = () => reloadsOf(reloads.current, to) !== loaded;
       const opened = visit.current;
       // Read before the line below replaces it: the keepalive names the write
-      // still in the air, which lands first and is what it finds on disk.
-      const before = inAir.current.get(to);
+      // still in the air, which lands first and is what it finds on disk. Not
+      // once a reload came between: this text was typed on the reload's.
+      const air = inAir.current.get(to);
+      const before = air?.loaded === loaded ? air.content : undefined;
       writing.current.set(to, (writing.current.get(to) ?? 0) + 1);
-      inAir.current.set(to, content);
+      inAir.current.set(to, { content, loaded });
       const answered = () => {
         lower(writing.current, to);
-        if (!writing.current.has(to)) inAir.current.delete(to);
+        if (writing.current.has(to)) return;
+        inAir.current.delete(to);
+        // An outside write declined while this was in the air is read now,
+        // once nothing of ours can land over it. The refetch answers later, so
+        // the arm below settles this write before the editor asks.
+        if (missed.current.delete(to)) {
+          void queryClient.invalidateQueries({ queryKey: ["note", to] }, { cancelRefetch: false });
+        }
       };
       // The flush on the way out of a note answers here with that note's
       // closure, after the hook already follows the next one: its slots, its
@@ -232,7 +258,8 @@ export function useAutosave(
             : saveNote(to, content, true, noteBase(under));
       } else {
         const queue = queued.current.get(to);
-        const under = queue?.visit === opened ? queue.link : Promise.resolve(base);
+        const under =
+          queue?.visit === opened && queue.loaded === loaded ? queue.link : Promise.resolve(base);
         request = queue === undefined ? send(base) : queue.link.then(() => under).then(send);
         // Never rejects, so a failed write still lets the next one go: the vault
         // did not move, as far as this hook knows.
@@ -240,7 +267,7 @@ export function useAutosave(
           (note) => note.content,
           () => under,
         );
-        queued.current.set(to, { link, visit: opened });
+        queued.current.set(to, { link, visit: opened, loaded });
         void link.then(() => {
           if (queued.current.get(to)?.link === link) queued.current.delete(to);
         });
@@ -272,8 +299,10 @@ export function useAutosave(
           }
           // The note that came back and never the text that was sent: the two
           // differ by the `modified` stamp `PUT` writes, and the next save names
-          // what is on disk.
-          if (here()) onDisk.current = note.content;
+          // what is on disk. Not after a reload since this went out: the
+          // reload's text came after this answer on disk, and the buffer was
+          // typed on it, so the next save names that (#298).
+          if (here() && !reloaded()) onDisk.current = note.content;
           // Typing during the write leaves newer text behind us, and that is not
           // saved however this one went. The cache waits on the same test: the
           // editor reloads from it, so writing the text that was in the air would
@@ -283,7 +312,13 @@ export function useAutosave(
           // A `:e!` during the write is the other way this text stops being the
           // note: the reader asked for the vault's version and got it, and
           // putting this in the cache would hand it straight back to them.
-          if (pending.current === null && reverts.current === sent) {
+          //
+          // So is a later write still in the air (#296): `pending` is empty
+          // because that one took its text, and this answer on screen would
+          // replace it there, and the keys typed next would go onto it. That
+          // write's own answer is the one the cache wants. Counted for this
+          // note alone: `answered` has already taken this write off.
+          if (pending.current === null && reverts.current === sent && !writing.current.has(to)) {
             queryClient.setQueryData(["note", path], note.content);
             if (here()) setStatus("saved");
           }
@@ -318,7 +353,34 @@ export function useAutosave(
             const at = heldAt.current.get(entry);
             return entry.content !== content && at?.visit === opened && at.seq >= seq;
           });
-          if (newer) return false;
+          // Not once the buffer took other text since this went out: the hide's
+          // entry was typed on that, not on this, and this text is on screen
+          // nowhere and held nowhere else (#297).
+          if (newer && !reloaded()) return false;
+          // A failure other than a refusal leaves the vault on the text this
+          // named, which an older write behind it may have landed while the
+          // cache was kept off it (#296). The cache gets that text once no
+          // write to the note is left, or a reopen would read the vault as
+          // moved past the held text's base, and a second pane would show the
+          // older one. Not after a `:e!` or a reload, which put the vault's
+          // text there since, nor for a conflicted note, whose base is stale.
+          // Nor for a keepalive, whose base is a guess at what the write ahead
+          // of it lands and not an answer, nor once the note moved: the count
+          // and the cache key are the old path's.
+          const settle = () => {
+            if (
+              named !== undefined &&
+              !keepalive &&
+              movedTo(to, since) === to &&
+              !refused &&
+              !wasConflicted &&
+              reverts.current === sent &&
+              !reloaded() &&
+              !writing.current.has(to)
+            ) {
+              queryClient.setQueryData(["note", to], named);
+            }
+          };
           // Its own send count: a write sent after this one and failing first
           // holds newer text, which this must not replace either.
           heldAt.current.set(held, { seq, visit: opened });
@@ -330,6 +392,7 @@ export function useAutosave(
           // the next note and threw away that one's text, not this.
           if (!here()) {
             holdText(now, held, carried);
+            settle();
             return false;
           }
           // Nothing to hold and nothing to warn about once the reader has thrown
@@ -342,7 +405,7 @@ export function useAutosave(
           // kept in `pending`, a leave or `:w` would write it over the newer.
           // Not when the buffer took other text since: the later write was
           // typed on that, and this text is on screen nowhere.
-          if (saves.current !== seq && reloads.current === loaded) return false;
+          if (saves.current !== seq && !reloaded()) return false;
 
           // Held as well as kept, because `here()` is also true for the flush
           // as the route unmounts, when this hook is gone and `pending` with it.
@@ -357,7 +420,7 @@ export function useAutosave(
           // the reload no longer reads as either.
           const doc = shownRef.current?.();
           const elsewhere =
-            reloads.current !== loaded ||
+            reloaded() ||
             (pending.current === null && doc !== undefined && !sameText(doc, content));
           if (elsewhere) {
             if (pending.current === null && !writing.current.has(to)) setStatus("saved");
@@ -370,6 +433,9 @@ export function useAutosave(
           // Hold on to the text: the next keystroke or `:w` tries again, or
           // only `:w` when the vault refused it.
           pending.current ??= content;
+          // After `pending`, so the editor asking about the cache finds the
+          // buffer dirty and keeps this text on screen.
+          settle();
           setReason(message);
           return false;
         },
@@ -556,7 +622,9 @@ export function useAutosave(
         // Only text the screen lacks: the editor asks with the text it already
         // shows as well, and that replaces nothing.
         const doc = shownRef.current?.();
-        if (doc !== undefined && !sameText(doc, text)) reloads.current += 1;
+        if (path !== undefined && doc !== undefined && !sameText(doc, text)) {
+          reloads.current.set(path, reloadsOf(reloads.current, path) + 1);
+        }
         return true;
       }
       // The vault holds what the buffer holds, whoever wrote it there, so
@@ -590,8 +658,19 @@ export function useAutosave(
    * caller should reload: yes for a clean buffer, no for a dirty one, which
    * keeps the reader's text and marks nothing. Its next save names its base,
    * and the vault refuses it if the write was somebody else's.
+   *
+   * No while a write to the note is in the air, too (#296): its answer may
+   * still come back older than the text the event reports, or be the event
+   * itself, a step behind a write queued after it. The note is reloaded once
+   * its last write answers instead.
    */
-  const reconcile = useCallback((): boolean => pending.current === null, []);
+  const reconcile = useCallback((): boolean => {
+    if (path !== undefined && writing.current.has(path)) {
+      missed.current.add(path);
+      return false;
+    }
+    return pending.current === null;
+  }, [path]);
 
   // React runs a cleanup with the render's own closure, so opening another
   // note writes what is pending to the note it was typed into, not to the one
@@ -655,13 +734,15 @@ export function useAutosave(
       // Nothing waiting, but a quiet write may still be in the air, and the page
       // going away cancels it. Its text is held and sent again with keepalive,
       // and the quiet write landing after all drops the held copy.
-      const content = pending.current ?? inAir.current.get(path);
+      const air = inAir.current.get(path);
+      const content = pending.current ?? air?.content;
       if (content === undefined) return;
       if (content === taken.current?.content) return;
       // Text typed behind a write in the air is typed on that write's text,
       // which the keepalive below names. Kept beside the base and not in its
-      // place: the page may die before that write arrives.
-      const before = inAir.current.get(path);
+      // place: the page may die before that write arrives. Not after a reload
+      // since that write went out, which the text was typed on instead.
+      const before = air?.loaded === reloadsOf(reloads.current, path) ? air.content : undefined;
       const entry = {
         content,
         reason: "Not yet written when the page was hidden",
