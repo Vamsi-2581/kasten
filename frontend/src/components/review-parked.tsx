@@ -1,6 +1,6 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { fetchCards, fetchNote, saveNote } from "@/lib/api";
+import { fetchCards, fetchNote } from "@/lib/api";
 import { clozePlain } from "@/lib/card-line";
 import { withoutTags } from "@/lib/deck-tag";
 import { noteName } from "@/lib/note-path";
@@ -12,6 +12,7 @@ import {
   setSuspended,
   writeNoteSuspended,
 } from "@/lib/srs";
+import { useSittingWrites } from "@/lib/use-sitting-writes";
 
 /** One row: a card the sitting will not ask, and where to find it again. */
 interface ParkedRow {
@@ -46,7 +47,7 @@ interface ReviewParkedProps {
 export function ReviewParked({ onLeave, onOpen, archive = false }: ReviewParkedProps) {
   const [texts, setTexts] = useState<Map<string, string> | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const queryClient = useQueryClient();
+  const write = useSittingWrites(setTexts, setFailed);
 
   // The same key the overview holds, so opening this screen reads no cards the
   // list behind it has not already fetched.
@@ -93,14 +94,7 @@ export function ReviewParked({ onLeave, onOpen, archive = false }: ReviewParkedP
     }
 
     setTexts((was) => new Map(was).set(row.note, next));
-    void saveNote(row.note, next).then(
-      () => {
-        void queryClient.invalidateQueries({ queryKey: ["cards"] });
-      },
-      (error: unknown) => {
-        setFailed(error instanceof Error ? error.message : "could not write the note");
-      },
-    );
+    write(row.note, text, next);
   }
 
   return (

@@ -1,7 +1,6 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NotePreview } from "@/components/note-preview";
-import { fetchNote, saveNote } from "@/lib/api";
+import { fetchNote } from "@/lib/api";
 import { soundsIn } from "@/lib/audio";
 import { readClock } from "@/lib/clock";
 import { inDeck } from "@/lib/deck-tag";
@@ -22,6 +21,7 @@ import {
   writeNoteSuspended,
   writeSchedule,
 } from "@/lib/srs";
+import { useSittingWrites } from "@/lib/use-sitting-writes";
 
 /**
  * Where the typing toggle is kept, which is the browser and not the vault.
@@ -127,7 +127,10 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
   const [jotting, setJotting] = useState<string | null>(null);
   const field = useRef<HTMLInputElement>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const queryClient = useQueryClient();
+  // A failed write puts its message in the bar and the session carries on,
+  // because a rating that vanished silently would be a card you answer again
+  // tomorrow believing you had not.
+  const write = useSittingWrites(setTexts, setFailed);
 
   const today = useMemo(() => readClock(new Date()).date, []);
 
@@ -274,20 +277,9 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
       const following = coming === undefined ? undefined : cards.get(coming.note)?.[coming.at];
       play(following === undefined ? [] : soundsShowing(following, false));
 
-      void saveNote(seat.note, next).then(
-        () => {
-          void queryClient.invalidateQueries({ queryKey: ["cards"] });
-        },
-        (error: unknown) => {
-          // The answer is not lost with the write. The session carries on and
-          // the bar says the note is the part that failed, because a rating
-          // that vanished silently would be a card you answer again tomorrow
-          // believing you had not.
-          setFailed(error instanceof Error ? error.message : "could not write the note");
-        },
-      );
+      write(seat.note, text, next);
     },
-    [cards, deck, play, queryClient, queue, seat, texts, today],
+    [cards, deck, play, queue, seat, texts, today, write],
   );
 
   /**
@@ -322,18 +314,8 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
     const following = coming === undefined ? undefined : cards.get(coming.note)?.[coming.at];
     play(following === undefined ? [] : soundsShowing(following, false));
 
-    void saveNote(seat.note, next).then(
-      () => {
-        void queryClient.invalidateQueries({ queryKey: ["cards"] });
-      },
-      (error: unknown) => {
-        // The same call `rate` makes, for the same reason: a write that failed
-        // silently would be a card you believe is parked and meet again
-        // tomorrow.
-        setFailed(error instanceof Error ? error.message : "could not write the note");
-      },
-    );
-  }, [cards, deck, play, queryClient, queue, seat, texts]);
+    write(seat.note, text, next);
+  }, [cards, deck, play, queue, seat, texts, write]);
 
   /**
    * Write what was jotted at the end of the note the card on screen came from.
@@ -351,15 +333,7 @@ export function ReviewSession({ deck, onLeave, onControls }: ReviewSessionProps)
     const next = appendStub(text, question.trim());
     setTexts((was) => new Map(was).set(seat.note, next));
     setJotting(null);
-
-    void saveNote(seat.note, next).then(
-      () => {
-        void queryClient.invalidateQueries({ queryKey: ["cards"] });
-      },
-      (error: unknown) => {
-        setFailed(error instanceof Error ? error.message : "could not write the note");
-      },
-    );
+    write(seat.note, text, next);
   }
 
   // A toggle, because the second press is the only way to shut the line

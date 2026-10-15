@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ReviewSession } from "@/components/review-session";
 import * as api from "@/lib/api";
+import { noteBase } from "@/lib/note-base";
 import type { Deck } from "@/lib/review";
 import { shownCard } from "./review-card";
 
@@ -316,6 +317,120 @@ describe("ReviewSession on a parked card", () => {
     expect(saved.mock.calls[0]?.[1]).toContain("What is Direct Connect?::A private link\n");
   });
 
+  it("names the text it read as the first save's base, and that save's answer as the next", async () => {
+    const saved = renderTwo();
+    // The vault's answer differs from what was sent, the way a stamp makes it.
+    saved.mockImplementation(async (path: string, content: string) => ({
+      path,
+      content: `${content}\nlanded\n`,
+    }));
+    await shownCard();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+
+    expect(saved.mock.calls[0]?.slice(2)).toEqual([false, noteBase(TWO)]);
+    expect(saved.mock.calls[1]?.[1]).toContain("landed");
+    expect(saved.mock.calls[1]?.[3]).toBe(noteBase(`${saved.mock.calls[0]?.[1]}\nlanded\n`));
+  });
+
+  it("holds a second rating's write until the first answers, and names that answer", async () => {
+    const saved = renderTwo();
+    let answer: (() => void) | undefined;
+    saved.mockImplementationOnce(
+      (path: string, content: string) =>
+        new Promise((resolve) => {
+          // The stamped block a note without one comes back with.
+          answer = () => resolve({ path, content: `---\nid: x\n---\n${content}` });
+        }),
+    );
+    saved.mockImplementation(async (path: string, content: string) => ({ path, content }));
+    await shownCard();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => {});
+    expect(saved).toHaveBeenCalledTimes(1);
+
+    await act(async () => answer?.());
+
+    expect(saved).toHaveBeenCalledTimes(2);
+    expect(saved.mock.calls[1]?.[3]).toBe(noteBase(`---\nid: x\n---\n${saved.mock.calls[0]?.[1]}`));
+  });
+
+  it("reads the note again after a refused rating, and names that text next", async () => {
+    const saved = renderTwo();
+    saved.mockRejectedValueOnce(new api.ChangedOnDisk());
+    const reread = `${TWO}\nsomebody else's line\n`;
+    await shownCard();
+    vi.mocked(api.fetchNote).mockResolvedValue(reread);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => {});
+
+    expect(saved).toHaveBeenCalledTimes(2);
+    expect(saved.mock.calls[1]?.[3]).toBe(noteBase(reread));
+    expect(screen.getByText(/could not be written: Changed on disk/)).toBeInTheDocument();
+  });
+
+  it("sends a rating queued behind a refused one, naming the unlanded text, and says it failed", async () => {
+    const saved = renderTwo();
+    let refuse: (() => void) | undefined;
+    saved.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          refuse = () => reject(new api.ChangedOnDisk());
+        }),
+    );
+    saved.mockRejectedValueOnce(new Error("the second was refused"));
+    await shownCard();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => refuse?.());
+    await act(async () => {});
+
+    expect(saved).toHaveBeenCalledTimes(2);
+    expect(saved.mock.calls[1]?.[3]).toBe(noteBase(saved.mock.calls[0]?.[1] ?? ""));
+    expect(screen.getByText(/could not be written: the second was refused/)).toBeInTheDocument();
+  });
+
+  it("names the old screen text for a rating made while the re-read is out", async () => {
+    const saved = renderTwo();
+    saved.mockRejectedValueOnce(new api.ChangedOnDisk());
+    await shownCard();
+    let reread: (() => void) | undefined;
+    vi.mocked(api.fetchNote).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          reread = () => resolve(`${TWO}\nsomebody else's line\n`);
+        }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => {});
+    expect(reread).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Show answer" }));
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => reread?.());
+    await act(async () => {});
+
+    expect(saved).toHaveBeenCalledTimes(2);
+    expect(saved.mock.calls[1]?.[3]).toBe(noteBase(saved.mock.calls[0]?.[1] ?? ""));
+  });
+
   it("drops it from the queue and moves to the next card", async () => {
     renderTwo();
     await shownCard();
@@ -348,10 +463,10 @@ describe("ReviewSession on a cloze", () => {
 
   function renderCloze(text = CLOZE) {
     vi.spyOn(api, "fetchNote").mockResolvedValue(text);
-    const saved = vi.spyOn(api, "saveNote").mockResolvedValue({
-      path: "decks/aws.md",
-      content: text,
-    });
+    // The vault answers with what was sent: the next rating starts from it.
+    const saved = vi
+      .spyOn(api, "saveNote")
+      .mockImplementation(async (path: string, content: string) => ({ path, content }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={client}>
