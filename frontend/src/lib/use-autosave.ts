@@ -123,6 +123,11 @@ export function useAutosave(
   // hold and resend it for that note (#302). `stale` gathers the base and the
   // named text of every write to the note still in the air, the earlier ones
   // too: a read answering with one of them is from before a write (#304).
+  // `sent` is the text and `reloads` count of the newest write to the note
+  // that went out: a write still queued behind it was never sent, and a hide
+  // typed behind the queue finds that text on disk, not the queued one's
+  // (#310). `restoring` marks the write `:e!` queued with the vault's own
+  // text, which nobody typed and a hide neither holds nor sends (#311).
   const inAir = useRef(
     new Map<
       string,
@@ -133,6 +138,8 @@ export function useAutosave(
         named?: string;
         stale: string[];
         visit: number;
+        sent?: { content: string; loaded: number };
+        restoring: boolean;
       }
     >(),
   );
@@ -208,10 +215,11 @@ export function useAutosave(
    * Resolves to whether the vault holds the text, so `<leader>q` can refuse.
    *
    * `keepalive` for the write as the page goes away, which the browser would
-   * otherwise cancel along with it.
+   * otherwise cancel along with it. `restoring` for the write `:e!` queues
+   * behind one in the air, which puts the vault's text back (#311).
    */
   const write = useCallback(
-    (keepalive: boolean, leaving = false): Promise<boolean> => {
+    (keepalive: boolean, leaving = false, restoring = false): Promise<boolean> => {
       if (timer.current) clearTimeout(timer.current);
       timer.current = null;
 
@@ -236,11 +244,17 @@ export function useAutosave(
       // Whether this note's buffer took the vault's text in since this went out.
       const reloaded = () => reloadsOf(reloads.current, to) !== loaded;
       const opened = visit.current;
-      // Read before the line below replaces it: the keepalive names the write
-      // still in the air, which lands first and is what it finds on disk. Not
-      // once a reload came between: this text was typed on the reload's.
+      // Read before the line below replaces it: the keepalive names the last
+      // write that went out, which lands first and is what it finds on disk.
+      // Not a write queued behind that one, which never left, and dies with
+      // the page (#310). Only when this buffer follows the queue, as a quiet
+      // write's `follows` reads it: a buffer reopened on the text under that
+      // write, or reloaded since, was typed on that text, and naming the
+      // write's would land over it unasked.
       const air = inAir.current.get(to);
-      const before = air?.loaded === loaded ? air.content : undefined;
+      const ahead = queued.current.get(to);
+      const follows = ahead?.visit === opened && ahead.loaded === loaded;
+      const before = follows && air?.sent?.loaded === loaded ? air.sent.content : undefined;
       writing.current.set(to, (writing.current.get(to) ?? 0) + 1);
       const answered = () => {
         lower(writing.current, to);
@@ -279,6 +293,8 @@ export function useAutosave(
         named: undefined as string | undefined,
         stale,
         visit: opened,
+        sent: air?.sent,
+        restoring,
       };
       inAir.current.set(to, flying);
       // The text leaving a note goes into the cache as it leaves, so a reopen
@@ -313,12 +329,13 @@ export function useAutosave(
         named = under;
         flying.named = under;
         // Onto whichever entry is newest now: a later write took this one's place.
-        if (under !== undefined) inAir.current.get(to)?.stale.push(under);
+        const newest = inAir.current.get(to);
+        if (under !== undefined) newest?.stale.push(under);
+        if (newest !== undefined) newest.sent = { content, loaded };
         return under === undefined || wasConflicted
           ? saveNote(to, content)
           : saveNote(to, content, false, noteBase(under));
       };
-      const ahead = queued.current.get(to);
       let request: Promise<Note>;
       let link: Promise<string | undefined>;
       if (keepalive) {
@@ -330,23 +347,41 @@ export function useAutosave(
         const under = before !== undefined && before !== content ? before : base;
         named = under;
         flying.named = under;
+        flying.sent = { content, loaded };
         if (under !== undefined) stale.push(under);
+        // Whether the write ahead answered, read when the refusal comes.
+        let answeredAhead = false;
+        void ahead?.link.then(() => {
+          answeredAhead = true;
+        });
         const first =
           under === undefined
             ? saveNote(to, content, true)
             : saveNote(to, content, true, noteBase(under));
         // Refused while the write ahead failed: `under` was a guess at what
         // that write lands, and it never did. The page lived on, so this goes
-        // again naming what the vault holds after it (#305). Not when that
-        // write landed: then somebody else's write since is the refusal.
+        // again naming what the vault holds after it (#305). Refused before
+        // that write answered, this overtook it on the way and found the text
+        // under it (#310): it goes again too, whatever that write landed.
+        // Only a refusal after a write ahead that landed `under` is somebody
+        // else's write since. The resend names what the vault answered, so
+        // the 409 still guards it. Never for a keepalive that named the base:
+        // the buffer was not typed on that write's text, and the refusal is
+        // the conflict between the two.
         request = first.then(
           (note) => note,
           async (failure: unknown) => {
-            if (!(failure instanceof ChangedOnDisk) || ahead === undefined || under === undefined) {
+            if (
+              !(failure instanceof ChangedOnDisk) ||
+              ahead === undefined ||
+              under === undefined ||
+              under !== before
+            ) {
               throw failure;
             }
+            const overtook = !answeredAhead;
             const landed = await ahead.link;
-            if (landed === undefined || landedAs(under, landed)) throw failure;
+            if (landed === undefined || (!overtook && landedAs(under, landed))) throw failure;
             return send(landed);
           },
         );
@@ -360,7 +395,6 @@ export function useAutosave(
           ),
         ]).then(([, text]) => text);
       } else {
-        const follows = ahead?.visit === opened && ahead.loaded === loaded;
         if (follows) ahead.followed = true;
         const under = follows ? ahead.link : Promise.resolve(base);
         request = ahead === undefined ? send(base) : ahead.link.then(() => under).then(send);
@@ -446,6 +480,15 @@ export function useAutosave(
           answered();
           // Never sent: the buffer holds the vault's text, and this was thrown away.
           if (failure instanceof Skipped) return false;
+          // The vault's own text, which nobody typed: nothing to hold or to
+          // retry. Refused, somebody wrote since, and their event reloads the
+          // clean buffer once nothing is in the air (#311).
+          if (restoring) {
+            if (here() && pending.current === null && !writing.current.has(to)) {
+              setStatus("saved");
+            }
+            return false;
+          }
           const message = failure instanceof Error ? failure.message : String(failure);
           // Somebody else wrote the note since the base this named, and the
           // vault kept their text: a conflict, which only `:w` settles.
@@ -673,16 +716,33 @@ export function useAutosave(
       // hold or send again.
       // Only the entry on screen: one the buffer never showed was not looked
       // at, let alone thrown away.
-      if (path !== undefined) {
-        if (taken.current) dropText(path, taken.current);
-        inAir.current.delete(path);
-      }
+      if (path !== undefined && taken.current) dropText(path, taken.current);
       take(null);
+      // Before the write below, which says "saving" and must have the last word.
       setStatus("saved");
       setReason(undefined);
+      if (path === undefined) return true;
+      // A write already sent lands its text anyway, and the vault would hold
+      // what the reader threw away, its event putting it back on the clean
+      // screen (#311). So the vault's text goes out behind it, an ordinary
+      // write in the queue that names its answer: refused, somebody wrote
+      // since, and their text stands. It takes the entry's place in `inAir`,
+      // so a hide resends the vault's text and not the thrown-away one. That
+      // text and the one sent stay in `stale`, so a slow read of either is
+      // declined while the restore is in the air.
+      const thrown = inAir.current.get(path);
+      if (busy && onDisk.current !== null) {
+        pending.current = onDisk.current;
+        void write(false, false, true);
+        const restore = inAir.current.get(path);
+        if (thrown !== undefined) restore?.stale.push(thrown.content);
+        if (thrown?.sent !== undefined) restore?.stale.push(thrown.sent.content);
+      } else {
+        inAir.current.delete(path);
+      }
       return true;
     },
-    [path, take, queryClient],
+    [path, take, queryClient, write],
   );
 
   /**
@@ -929,22 +989,32 @@ export function useAutosave(
       // page as well (#302). Held for its own note under the base it was typed
       // on, and sent again with keepalive naming what it named; landing, the
       // copy goes. Not after a reload of that note since it went out: the
-      // screen holds text this was not typed on (#306).
+      // screen holds text this was not typed on (#306). A write still queued
+      // was never sent, and names the last one that was, which is what lands
+      // under it (#310). Not the vault's own text `:e!` put back (#311).
       for (const [note, air] of [...inAir.current]) {
-        if (note === path || air.loaded !== reloadsOf(reloads.current, note)) continue;
+        if (note === path || air.restoring || air.loaded !== reloadsOf(reloads.current, note)) {
+          continue;
+        }
+        const out = air.sent?.loaded === air.loaded ? air.sent : undefined;
+        const under =
+          out === undefined
+            ? air.base
+            : out.content === air.content
+              ? (air.named ?? air.base)
+              : out.content;
         const entry: Held = {
           content: air.content,
           reason: "Not yet written when the page was hidden",
           conflicted: false,
           base: air.base,
-          after: air.named !== air.base ? air.named : undefined,
+          after: under !== air.base ? under : undefined,
         };
         holdText(note, entry);
         // On the visit the text was typed in, as that visit's hide would have
         // held it: an older write of that visit failing behind it then reads
         // this as newer text typed on its own, and drops itself (#290).
         heldAt.current.set(entry, { seq: saves.current, visit: air.visit });
-        const under = air.named ?? air.base;
         void (
           under === undefined
             ? saveNote(note, air.content, true)
@@ -961,17 +1031,26 @@ export function useAutosave(
       // Nothing waiting, but a quiet write may still be in the air, and the page
       // going away cancels it. Its text is held and sent again with keepalive,
       // and the quiet write landing after all drops the held copy. Not after a
-      // reload since it went out: that text is on screen nowhere (#306).
+      // reload since it went out: that text is on screen nowhere (#306). Nor
+      // the write `:e!` queued with the vault's text, which nobody typed: held,
+      // it would read as the reader's and stand as a conflict with whoever
+      // wrote since (#311).
       const air = inAir.current.get(path);
-      const fresh = air?.loaded === reloadsOf(reloads.current, path) ? air : undefined;
+      const fresh =
+        air?.loaded === reloadsOf(reloads.current, path) && !air.restoring ? air : undefined;
       const content = pending.current ?? fresh?.content;
       if (content === undefined) return;
       if (content === taken.current?.content) return;
       // Text typed behind a write in the air is typed on that write's text,
-      // which the keepalive below names. Kept beside the base and not in its
-      // place: the page may die before that write arrives. Not after a reload
-      // since that write went out, which the text was typed on instead.
-      const before = air?.loaded === reloadsOf(reloads.current, path) ? air.content : undefined;
+      // which the keepalive below names: the last one sent, a queued one never
+      // reaching the vault (#310). Kept beside the base and not in its place:
+      // the page may die before that write arrives. Not after a reload since
+      // that write went out, which the text was typed on instead, nor when the
+      // buffer does not follow the queue, `write`'s own test.
+      const loaded = reloadsOf(reloads.current, path);
+      const queue = queued.current.get(path);
+      const follows = queue?.visit === visit.current && queue.loaded === loaded;
+      const before = follows && air?.sent?.loaded === loaded ? air.sent.content : undefined;
       const entry = {
         content,
         reason: "Not yet written when the page was hidden",
