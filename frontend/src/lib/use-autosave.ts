@@ -1035,9 +1035,36 @@ export function useAutosave(
       // the write `:e!` queued with the vault's text, which nobody typed: held,
       // it would read as the reader's and stand as a conflict with whoever
       // wrote since (#311).
+      const loaded = reloadsOf(reloads.current, path);
+      const queue = queued.current.get(path);
+      const follows = queue?.visit === visit.current && queue.loaded === loaded;
       const air = inAir.current.get(path);
-      const fresh =
-        air?.loaded === reloadsOf(reloads.current, path) && !air.restoring ? air : undefined;
+      const fresh = air?.loaded === loaded && !air.restoring ? air : undefined;
+      // A buffer reopened on the text under that write, which it does not
+      // follow, shows other text: a keepalive would land this unseen (#314). Held
+      // only, under the base it was typed on, so the page dying still keeps
+      // it, and the quiet write landing drops it. Beside it the text the write
+      // named, as the loop above keeps it: a write ahead of it that landed is
+      // the reader's own, no conflict on reopening.
+      if (pending.current === null && fresh !== undefined && !follows) {
+        const out = fresh.sent?.loaded === fresh.loaded ? fresh.sent : undefined;
+        const under =
+          out === undefined
+            ? fresh.base
+            : out.content === fresh.content
+              ? (fresh.named ?? fresh.base)
+              : out.content;
+        const entry: Held = {
+          content: fresh.content,
+          reason: "Not yet written when the page was hidden",
+          conflicted: conflicted.current,
+          base: fresh.base,
+          after: under !== fresh.base ? under : undefined,
+        };
+        holdText(path, entry);
+        heldAt.current.set(entry, { seq: saves.current, visit: fresh.visit });
+        return;
+      }
       const content = pending.current ?? fresh?.content;
       if (content === undefined) return;
       if (content === taken.current?.content) return;
@@ -1047,9 +1074,6 @@ export function useAutosave(
       // the page may die before that write arrives. Not after a reload since
       // that write went out, which the text was typed on instead, nor when the
       // buffer does not follow the queue, `write`'s own test.
-      const loaded = reloadsOf(reloads.current, path);
-      const queue = queued.current.get(path);
-      const follows = queue?.visit === visit.current && queue.loaded === loaded;
       const before = follows && air?.sent?.loaded === loaded ? air.sent.content : undefined;
       const entry = {
         content,
