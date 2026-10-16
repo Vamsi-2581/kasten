@@ -88,6 +88,7 @@ import {
   openImageInFocused,
   openInFocused,
   openPdfBeside,
+  openPdfInFocused,
   openPersonBeside,
   openReviewInFocused,
   openTerminalInFocused,
@@ -213,6 +214,13 @@ function Home() {
   const linkable = useMemo(
     () => data && [...data, ...(html ?? []), ...(assets ?? [])],
     [data, html, assets],
+  );
+  // The pdfs among the assets, which are rows of the tree the way images are
+  // (#361). The books stay out, a book being opened beside its note and never
+  // from a row. Any case, a scan arriving as `PLAN.PDF` as often as not.
+  const pdfs = useMemo(
+    () => (assets ?? []).filter((path) => path.toLowerCase().endsWith(".pdf")),
+    [assets],
   );
   // The vault's tag vocabulary, for the completion an open `#` offers. Not
   // filtered by the archive toggle: a tag written in an archived note is
@@ -1045,6 +1053,23 @@ function Home() {
   );
 
   /**
+   * Show a pdf at its first page in the focused pane, from a row of the tree.
+   *
+   * `openImageInPane`'s shape and not `openPdfInPane`'s: a row opens what it
+   * names over the pane, as an image row does, so the note in it is saved
+   * before it goes. A followed link is what opens one beside.
+   */
+  const openPdfFromTree = useCallback(
+    async (path: string) => {
+      if (!(await saveFirst())) return;
+
+      setLayout((previous) => openPdfInFocused(previous, path));
+      setFocusSignal((previous) => previous + 1);
+    },
+    [saveFirst],
+  );
+
+  /**
    * Open the note a `[[link]]` names, making it if the vault has none.
    *
    * The listing is what turns a name into a path, so the resolving happens
@@ -1074,7 +1099,15 @@ function Home() {
       if (paths.includes(path) && heading !== null) {
         // A note opened while this one was read is where the reader went
         // next, and the jump arriving late must not pull them back.
-        const from = focusedNote.current.path;
+        //
+        // Where the read starts from is the pane the focus is in now, not
+        // `focusedNote`: a ctrl+click in another pane moves the focus there in
+        // this same call, and the ref hears of it only once React has drawn
+        // the move. Read from the ref, the click's own move would look like
+        // the reader going elsewhere and drop the open (#361).
+        const at = document.activeElement?.closest<HTMLElement>("[data-pane]")?.dataset.pane;
+        const here = tabPanes(layoutNow.current).find((each) => each.id === at);
+        const from = here === undefined ? focusedNote.current.path : here.path;
         const open = (line?: number) => {
           if (focusedNote.current.path === from) void openInPane(path, line);
         };
@@ -2046,13 +2079,17 @@ function Home() {
           // archive is archived like everything else under that folder.
           images={visible(images ?? [], archive)}
           html={visible(html ?? [], archive)}
-          // What the focused pane holds, whichever of the four fields carries
-          // it. A reader and an exam name the note they were opened from, so
-          // the tree marks that note and `<leader>E` reaches it from either.
-          openPath={pane.path ?? pane.book ?? pane.exam ?? pane.image ?? pane.html}
+          pdfs={visible(pdfs, archive)}
+          // What the focused pane holds, whichever of the fields carries it. A
+          // reader and an exam name the note they were opened from, so the tree
+          // marks that note and `<leader>E` reaches it from either.
+          openPath={
+            pane.path ?? pane.book ?? pane.exam ?? pane.image ?? pane.html ?? pane.pdf?.path
+          }
           onOpenFile={(path) => void openInPane(path)}
           onOpenImage={(path) => void openImageInPane(path)}
           onOpenHtml={(path) => void openHtmlInPane(path)}
+          onOpenPdf={(path) => void openPdfFromTree(path)}
           open={treeOpen}
           onOpenChange={setTreeOpen}
           commands={commands}
