@@ -394,6 +394,53 @@ The dev compose files take two more such overrides, both defaulting to this
 box: `KASTEN_NETWORK` (`web`) for the external network, and `KASTEN_DB_PORT`
 (`5434`) for the dev Postgres's host port.
 
+## Remove the service worker
+
+The frontend ships `/sw.js`, a worker that opens the installed app with no
+signal. To remove it, ship a worker that removes itself. Put this in
+`frontend/sw/sw.js`, delete the line `import "./lib/service-worker";` from
+`frontend/src/main.tsx` in the same release (or every load registers the
+self-removing worker again), and cut the release. The browser fetches `/sw.js`
+through oauth2-proxy, so a phone picks it up only when it opens the app online
+with a live session: sign in first if it has expired. It takes over at once, deletes every cache, unregisters, and
+reloads every open window, which then loads from the network with no worker:
+
+```js
+self.addEventListener("install", () => self.skipWaiting());
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    (async () => {
+      for (const name of await caches.keys()) await caches.delete(name);
+      await self.registration.unregister();
+      for (const client of await self.clients.matchAll({ type: "window" })) {
+        client.navigate(client.url);
+      }
+    })(),
+  );
+});
+```
+
+The build plugin expects the `__PRECACHE__` and `__VERSION__` placeholders and
+stops with an error without them, so keep both in a comment at the top of that
+file.
+
+A plain revert does not remove the worker. A build without it has no
+`/sw.js`, and nginx answers that path with `404`, but a `404` does not
+unregister a worker: checked in Chromium, the update fails and the old worker
+stays in control. It does little harm there, as it fetches every page from the
+network first and so serves the new release, but it keeps its cache.
+
+Check what prod serves:
+
+```sh
+docker exec kasten-frontend-prod wget -S -O- http://127.0.0.1:3000/sw.js
+```
+
+`200` with `Content-Type: application/javascript` and the worker's code is a
+live worker, or the one that removes itself. `404` means no worker ships,
+and phones that had one keep it.
+
 ## Related
 
 * [Two environments](/explanation/environments.md): why dev and prod are built in opposite ways, and the constraints this box imposes
