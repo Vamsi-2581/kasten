@@ -189,13 +189,25 @@ const READING = /<(rt|rp)\b[^>]*>.*?<\/\1>/g;
 const RUBY_TAG = /<\/?ruby\b[^>]*>/g;
 
 /**
+ * An escape pair, a code span or a backtick run that closes none, leftmost
+ * first, as `colons` reads them: `` \` `` opens no span.
+ */
+const TYPED = /\\[\s\S]|(`+)(?!`)([\s\S]*?)(?<!`)\1(?!`)|`+/g;
+
+/**
  * `target` as somebody types it: an imported `<ruby>漢字<rt>かんじ</rt></ruby>`
  * is the word `漢字`, the reading drawn over it being a hint and not the answer.
  *
  * An imported `a&#58;&#58;b` is `a::b` too, and `a\\-b` is `a\-b`, as `colons` and `unescaped` give them.
+ * A code span is its text as written, since nobody types the backticks (#346),
+ * and keeps its backslashes, as markdown reads no escape there.
  */
 function typedTarget(target: string): string {
-  return unescaped(colons(target.replace(READING, "").replace(RUBY_TAG, "")));
+  return colons(target.replace(READING, "").replace(RUBY_TAG, "")).replace(
+    TYPED,
+    (found, ticks: string | undefined, code: string | undefined) =>
+      ticks === undefined ? unescaped(found) : (code ?? ""),
+  );
 }
 
 /**
