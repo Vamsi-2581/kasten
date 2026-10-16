@@ -146,7 +146,8 @@ export const pdfRenderer = Facet.define<PdfRenderer, PdfRenderer>({
  * page it can read across without scrolling sideways.
  *
  * `measured` is called whenever the box changes height under a line the editor
- * has already measured.
+ * has already measured. `page` is scrolled to the top of the box, and a page
+ * the pdf does not have leaves the first there.
  */
 export function showPdf(
   box: HTMLElement,
@@ -154,9 +155,11 @@ export function showPdf(
   url: string,
   name: string,
   measured: () => void,
+  page?: number,
 ): () => void {
   const opening = renderer.open(url);
   let observer: IntersectionObserver | null = null;
+  let resizer: ResizeObserver | null = null;
   let gone = false;
 
   const failed = () => {
@@ -238,12 +241,50 @@ export function showPdf(
         slots.set(slot, number);
         observer.observe(slot);
       }
+      // The page at the top of the box, and how far down it the box is
+      // scrolled, as a share of its height. The browser keeps the scroll in
+      // pixels, so a box that changes width, a phone turned or a window
+      // resized, would show another page, and one hidden and shown again
+      // shows the first; so the box scrolls back to this whenever it changes
+      // size. A page and not a share of the whole box, which drifts by the
+      // gaps between pages, and those do not grow with the width.
+      const pages = [...box.children] as HTMLElement[];
+      const head = pages[0] as HTMLElement;
+      let top = page !== undefined && page <= pages.length ? page - 1 : 0;
+      let share = 0;
+      // The box's own scroll and not `scrollIntoView`, which scrolls every
+      // box around it too and would jump the editor. Measured from the first
+      // slot, so whatever the slots are placed against drops out.
+      const scroll = () => {
+        const slot = pages[top] as HTMLElement;
+        box.scrollTop = slot.offsetTop - head.offsetTop + share * slot.offsetHeight;
+      };
+      scroll();
+      box.addEventListener("scroll", () => {
+        // At the end the browser may have cut the scroll short, a last page
+        // shorter than the box stopping it inside the page before: that is
+        // not a place anyone chose, and the one before it is kept.
+        if (box.scrollTop >= box.scrollHeight - box.clientHeight) return;
+        const y = box.scrollTop + head.offsetTop;
+        let at = 0;
+        while (at + 1 < pages.length && (pages[at + 1] as HTMLElement).offsetTop <= y) at += 1;
+        const slot = pages[at] as HTMLElement;
+        // A hidden box has no layout to read, and keeps the place it had.
+        if (slot.offsetHeight === 0) return;
+        top = at;
+        share = (y - slot.offsetTop) / slot.offsetHeight;
+      });
+      resizer = new ResizeObserver(() => {
+        if ((pages[top] as HTMLElement).offsetHeight > 0) scroll();
+      });
+      resizer.observe(box);
       measured();
     }, failed);
 
   return () => {
     gone = true;
     observer?.disconnect();
+    resizer?.disconnect();
     for (const slot of [...canvases.keys()]) free(slot);
     opening.destroy();
   };
