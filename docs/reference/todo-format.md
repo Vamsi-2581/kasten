@@ -29,7 +29,12 @@ or to `GET /api/todos`.
 
 A state change patches the line rather than rebuilding it. The box changes, and
 the stamps the change adds or drops (`✅`, `❌`, `🆔`, `👤`, `➕`) go in or come
-out; every other byte stays where it was typed. That keeps a tab indent, a
+out; every other byte stays where it was typed. A field kasten writes without a
+state change patches the line the same way: picking a blocker adds its `⛔`
+after the last `⛔` the line names and a `🆔` to the blocker where it has none,
+`<leader>i` adds `🆔`, a timer's first start adds `🆔`, a stop
+writes the `⏱` total over the old one or adds it, and an edit that takes off
+the last `⛔` opens the box and touches nothing else. That keeps a tab indent, a
 `^block` id at the end of the line where links find it, the spacing in the
 words, and fields that sit out of [the order below](#the-field-order). A stamp
 goes in at its place in that order. If no place reads back right, kasten writes
