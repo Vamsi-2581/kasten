@@ -51,6 +51,7 @@ import {
   clozeNumbers,
   clozeQuestion,
   clozeTarget,
+  colons,
   divide,
   fences,
   holdsCloze,
@@ -189,9 +190,11 @@ const RUBY_TAG = /<\/?ruby\b[^>]*>/g;
 /**
  * `target` as somebody types it: an imported `<ruby>漢字<rt>かんじ</rt></ruby>`
  * is the word `漢字`, the reading drawn over it being a hint and not the answer.
+ *
+ * An imported `a&#58;&#58;b` is `a::b` too, as `colons` gives it.
  */
 function typedTarget(target: string): string {
-  return target.replace(READING, "").replace(RUBY_TAG, "");
+  return colons(target.replace(READING, "").replace(RUBY_TAG, ""));
 }
 
 /**
@@ -210,10 +213,10 @@ function clozeCards(
   // The card's own tags are no part of the question, here as on any card.
   const text = withoutTags(line);
   return clozeNumbers(line).map((cloze) => {
-    const answer = clozeAnswer(text, cloze);
+    const answer = colons(clozeAnswer(text, cloze));
     return {
       ...card,
-      front: clozeQuestion(text, cloze),
+      front: colons(clozeQuestion(text, cloze)),
       back: extra === "" ? answer : `${answer}\n\n${extra}`,
       decks: [],
       held: readSchedule(schedule, clozeComment(cloze)),
@@ -309,8 +312,8 @@ export function parseCards(text: string, note = ""): Card[] {
       to,
       // The card's own tags are part of the format and not part of the
       // question, so they come off the front before it is ever asked.
-      front: withoutTags(lines.slice(from, at).join("\n")).trim(),
-      back,
+      front: colons(withoutTags(lines.slice(from, at).join("\n")).trim()),
+      back: colons(back),
       inline: false,
       decks: [],
       held: schedule,
@@ -348,8 +351,8 @@ export function parseCards(text: string, note = ""): Card[] {
     cards.push({
       from: at,
       to: at,
-      front: withoutTags(halves.front).trim(),
-      back: halves.back,
+      front: colons(withoutTags(halves.front).trim()),
+      back: colons(halves.back),
       inline: true,
       decks: [],
       held: readSchedule(line),
