@@ -1455,7 +1455,22 @@ function build(state: EditorState): Live {
         // a quote line among them. Nothing resolves a definition (#439), so it
         // is text and keeps its brackets, as Obsidian shows it. Told apart by
         // the `(` mark rather than the URL: `[a]()` is a link to nowhere.
-        if (node.node.getChildren("LinkMark").length < 3) return;
+        // The highlighter still colours a Link node as a link, so the mark
+        // takes that look back off, the cursor on it or not (#441).
+        if (node.node.getChildren("LinkMark").length < 3) {
+          // A heading's colour sits on the same spans as the link's, so the
+          // CSS has to be told to give it back. Read off the tree, because a
+          // setext heading's line carries no heading class.
+          let inHeading = false;
+          for (let up = node.node.parent; up; up = up.parent) {
+            if (/^(ATX|Setext)Heading[1-6]$/.test(up.name)) inHeading = true;
+          }
+          const name = inHeading
+            ? "cm-plain-brackets cm-plain-brackets-heading"
+            : "cm-plain-brackets";
+          decorations.push(Decoration.mark({ class: name }).range(node.from, node.to));
+          return;
+        }
 
         // A link carries four marks, `[`, `]`, `(` and `)`. The first two
         // bracket the text worth showing; everything from the second to the end
