@@ -9,7 +9,7 @@ status: stable
 
 # HTTP API
 
-The backend serves thirty-five endpoints under `/api/`. Twenty-one read,
+The backend serves thirty-six endpoints under `/api/`. Twenty-two read,
 thirteen write, and one streams. The interactive schema is at `/docs` while the backend
 runs, and the machine-readable one at `/openapi.json`.
 
@@ -354,6 +354,43 @@ The cap of 2,000 is about what crosses the wire, not what the machine can do:
 client ranks everything it is handed and cuts afterwards, the rows on screen
 are the best of the match set rather than the head of it, and 2,000 is the
 whole match set for anything but the most common word in a vault.
+
+## GET /api/mentions
+
+Finds the unlinked mentions of one note: every place another note names it in
+plain text without linking to it. Takes `path`, the note's vault path, and an
+optional `archive`, and answers with at most 1,000 mentions, sorted by path,
+then line, then place on the line. A note that does not exist is a `404`.
+
+```json
+[{ "path": "journal.md", "line": 3, "text": "Read Borges today.", "start": 5, "end": 11, "name": "Borges" }]
+```
+
+The names are the note's title, its file name without `.md`, and each of its
+[aliases](/reference/note-frontmatter.md#every-other-field-is-yours). `name`
+says which one matched, spelled as the note spells it. A match ignores case and
+counts only whole: no letter or digit may touch it on either side,
+so `borges` finds `Borges,` and not `borgesian`, and `C++` and `2026-W32` still
+match.
+
+A name inside a `[[wikilink]]` or `![[embed]]`, inside a markdown link (its
+text or its address), inside code (fenced or inline) or inside the block at the
+top of a note is not a mention, because a link does not go there. The note
+itself is never listed. Two mentions on one line are two entries.
+
+A `#tag` holding a name and an address written out bare, `https://x.org/borges`,
+are skipped too, since a link inside either would break it. An underscore does
+not join a word, so `_Borges_` is a mention.
+
+`text` is the whole line as `GET /api/files/{path}` serves the note, where a
+`\r\n` ends a line as `\n` does, so it matches that line of what the client
+read. `start` and `end` count UTF-16 code units into it, which is how the
+browser slices a string, so `text.slice(start, end)` is the mention as written.
+
+`rg` picks the notes holding any of the names, and the backend then reads those
+to find where. `archive` works as it does on a search. The cap is the list the
+pane shows: nothing ranks it afterwards, and a title like `Week` can be named
+on most lines of a large vault.
 
 ## GET /api/tags
 
