@@ -269,6 +269,47 @@ async def test_save_preserves_crlf(
     assert landed.endswith(b"\r\n\r\n# one\r\n")
 
 
+CRLF_NOTE = (
+    b"---\r\nid: 019\r\ncreated: 2026-08-01T00:00:00+00:00\r\ntype: Note\r\n"
+    b"modified: 2026-08-01T00:00:00+00:00\r\n---\r\n\r\n# one\r\n"
+)
+
+
+async def test_save_of_lf_text_over_a_crlf_note_keeps_crlf(
+    client: AsyncClient, agent_vault: Path, bearer: dict[str, str]
+) -> None:
+    # An agent may hand back the text it read with every CRLF turned into an
+    # LF, as plenty of clients do. The note stays a CRLF one all the same.
+    (agent_vault / "windows.md").write_bytes(CRLF_NOTE)
+    read = (await client.get("/agent/notes/windows.md", headers=bearer)).json()
+
+    response = await client.put(
+        "/agent/notes/windows.md",
+        json={"content": "# one\n\n# two\n", "sha": read["sha"]},
+        headers=bearer,
+    )
+
+    assert response.status_code == 200
+    landed = (agent_vault / "windows.md").read_bytes()
+    assert landed.count(b"\n") == landed.count(b"\r\n")
+    assert landed.endswith(b"\r\n---\r\n# one\r\n\r\n# two\r\n")
+
+
+async def test_append_to_a_crlf_note_keeps_crlf(
+    client: AsyncClient, agent_vault: Path, bearer: dict[str, str]
+) -> None:
+    (agent_vault / "windows.md").write_bytes(CRLF_NOTE)
+
+    response = await client.post(
+        "/agent/notes/windows.md/append", json={"text": "# two\n"}, headers=bearer
+    )
+
+    assert response.status_code == 200
+    landed = (agent_vault / "windows.md").read_bytes()
+    assert landed.count(b"\n") == landed.count(b"\r\n")
+    assert landed.endswith(b"\r\n\r\n# one\r\n\r\n# two\r\n")
+
+
 async def test_append_creates_with_no_leading_blank_line(
     client: AsyncClient, agent_vault: Path, bearer: dict[str, str]
 ) -> None:
@@ -326,6 +367,23 @@ async def test_a_write_whose_result_exceeds_the_bound_is_refused(
 
     assert response.status_code == 413
     assert (agent_vault / "big.md").read_text() == "x" * (1024 * 1024 - 64)
+
+
+async def test_a_write_the_crlf_puts_over_the_bound_is_refused(
+    client: AsyncClient, agent_vault: Path, bearer: dict[str, str]
+) -> None:
+    # LF text just under the bound, sent over a CRLF note, lands a byte longer
+    # per line. The bound is on what lands, so it is measured after that.
+    (agent_vault / "windows.md").write_bytes(CRLF_NOTE)
+    read = (await client.get("/agent/notes/windows.md", headers=bearer)).json()
+    lines = ("x" * 99 + "\n") * ((1024 * 1024 - 300) // 100)
+
+    response = await client.put(
+        "/agent/notes/windows.md", json={"content": lines, "sha": read["sha"]}, headers=bearer
+    )
+
+    assert response.status_code == 413
+    assert (agent_vault / "windows.md").read_bytes() == CRLF_NOTE
 
 
 async def test_the_schema_needs_a_token(client: AsyncClient, agent_vault: Path) -> None:

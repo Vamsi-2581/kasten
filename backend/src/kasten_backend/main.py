@@ -990,7 +990,9 @@ async def _import_bytes(body: bytes, settings: Settings, *, carry: bool) -> Anki
         raise HTTPException(status_code=413, detail="That export is too large")
 
     try:
-        decks = read_apkg(body, settings.flashcards_path, carry=carry)
+        # In a worker thread: unzipping, zstd and sqlite take seconds on a big
+        # deck, and on the event loop every other request would wait them out.
+        decks = await asyncio.to_thread(read_apkg, body, settings.flashcards_path, carry=carry)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1580,12 +1582,7 @@ async def move_file(
             # delete an id and a creation date the note owns, and converting the
             # body is a job for a person.
             if reserved(source) and not reserved(relative):
-                # Read without translating the line endings and put back the
-                # ones the file had, for the reason the backfill does it: a note
-                # is rewritten here, and only its block was asked for.
-                raw = target.read_text(encoding="utf-8", newline="")
-                stamped = stamp(raw.replace("\r\n", "\n"))
-                write_note(target, stamped.replace("\n", "\r\n") if "\r\n" in raw else stamped)
+                write_note(target, stamp(target.read_text(encoding="utf-8")))
             # After the note and before the prune, so a folder the pair has both
             # left is one the prune can take.
             move_asset_beside(note, target)
