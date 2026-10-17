@@ -78,6 +78,58 @@ describe("toHtml", () => {
   });
 });
 
+describe("a callout", () => {
+  it("gives Slack the callout's title as a bold line", () => {
+    expect(toSlack("> [!tip] Use jj\n> It keeps history.")).toBe("> *Use jj*\n> It keeps history.");
+  });
+
+  it("gives Teams the callout's title as a bold paragraph", () => {
+    expect(toHtml("> [!tip] Mind <this>\n> It keeps history.")).toBe(
+      "<blockquote><p><strong>Mind &lt;this&gt;</strong></p><p>It keeps history.</p></blockquote>",
+    );
+  });
+
+  it("titles a callout with no title after its type", () => {
+    expect(toSlack("> [!warning]\n> Hot.")).toBe("> *Warning*\n> Hot.");
+  });
+
+  it("keeps a callout's fold sign out of the chat", () => {
+    expect(toSlack("> [!faq]- Why?\n> Because.")).toBe("> *Why?*\n> Because.");
+    expect(toHtml("> [!faq]+ Why?")).toBe("<blockquote><p><strong>Why?</strong></p></blockquote>");
+  });
+
+  it("titles a callout nested in a callout", () => {
+    expect(toSlack("> [!note] Outer\n> > [!bug] Inner\n> > Body")).toBe(
+      "> *Outer*\n> > *Inner*\n> > Body",
+    );
+  });
+
+  it("renders a callout title's wikilink and emphasis as the chat's own", () => {
+    const note = "> [!note] See [[Other|alias]] **now**\n> body";
+    expect(toSlack(note)).toBe("> *See alias now*\n> body");
+    expect(toHtml(note)).toBe(
+      "<blockquote><p><strong>See alias <strong>now</strong></strong></p><p>body</p></blockquote>",
+    );
+  });
+
+  it("keeps a callout title's literal and code asterisks for Slack", () => {
+    expect(toSlack("> [!note] 2 * 3 and `a*b`\n> x")).toBe("> *2 * 3 and `a*b`*\n> x");
+  });
+
+  it("prints a callout title that runs onto the next line once", () => {
+    expect(toSlack("> [!note] *Title\n> more*\n> body")).toBe("> *Title more*\n> body");
+  });
+
+  it("reads a callout only off the quote's first line", () => {
+    expect(toSlack(">\n> [!note] T\n> body")).not.toContain("*T*");
+  });
+
+  it("leaves a quote that opens no callout as it is", () => {
+    expect(toSlack("> plain\n>\n> two")).toBe("> plain\n> \n> two");
+    expect(toHtml("> one")).toBe("<blockquote><p>one</p></blockquote>");
+  });
+});
+
 describe("a wikilink's alias and heading", () => {
   it("writes an aliased wikilink as its alias", () => {
     expect(toSlack("see [[borges|Jorge]]")).toBe("see Jorge");

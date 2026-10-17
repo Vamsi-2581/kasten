@@ -12,6 +12,7 @@
 
 import type { SyntaxNode } from "@lezer/common";
 import { GFM, parser } from "@lezer/markdown";
+import { parseCallout } from "@/lib/callout";
 import { Highlight } from "@/lib/markdown-highlight";
 import { noteBody } from "@/lib/note-frontmatter";
 import { Tag } from "@/lib/tag";
@@ -93,13 +94,14 @@ function inline(
   format: Format,
   from = node.from,
   to = node.to,
+  render = span,
 ): string {
   let out = "";
   let pos = from;
   for (let child = node.firstChild; child; child = child.nextSibling) {
     if (child.to <= from || child.from >= to) continue;
     out += prose(source.slice(pos, child.from), format);
-    out += span(child, source, format);
+    out += render(child, source, format);
     pos = child.to;
     // The space after a continued quote's `>` belongs to the mark.
     if (child.name === "QuoteMark" && source[pos] === " ") pos += 1;
@@ -177,7 +179,7 @@ function block(node: SyntaxNode, source: string, format: Format): string {
     case "Paragraph":
       return html ? `<p>${inline(node, source, format)}</p>` : inline(node, source, format);
     case "Blockquote": {
-      const body = blocks(node, source, format);
+      const body = callout(node, source, format) ?? blocks(node, source, format);
       return html ? `<blockquote>${body}</blockquote>` : body.replace(/^/gm, "> ");
     }
     case "BulletList":
@@ -201,6 +203,60 @@ function block(node: SyntaxNode, source: string, format: Format): string {
     default:
       return inline(node, source, format);
   }
+}
+
+/**
+ * A quote that opens with `[!type]`, its header as a bold line and the rest
+ * as the quote's body, or null when the quote is no callout. Neither chat
+ * draws a callout, and `[!warning]-` pasted as it stands reads as noise.
+ */
+function callout(node: SyntaxNode, source: string, format: Format): string | null {
+  const mark = node.firstChild;
+  let first = mark;
+  while (first && MARKS.has(first.name)) first = first.nextSibling;
+  if (!mark || first?.name !== "Paragraph") return null;
+  // The header must sit on the quote's own first line, as the editor reads
+  // it: a paragraph that starts lower down, under a bare `>`, opens nothing.
+  if (source.slice(mark.to, first.from).trim() !== "") return null;
+  const newline = source.indexOf("\n", first.from);
+  let lineEnd = newline === -1 || newline > first.to ? first.to : newline;
+  const header = parseCallout(source.slice(first.from, lineEnd));
+  if (!header) return null;
+  // An emphasis opened in the title and closed on a later line belongs to the
+  // title, or the body would print it a second time.
+  for (let child = first.firstChild; child; child = child.nextSibling) {
+    if (child.from < lineEnd && child.to > lineEnd) lineEnd = child.to;
+  }
+
+  const title = header.titled
+    ? inline(first, source, format, first.from + header.length, lineEnd, plain)
+        .trim()
+        .replace(/\n/g, " ")
+    : prose(header.title, format);
+  const parts: string[] = [];
+  // The paragraph runs on past the header when the body follows on the next line.
+  if (lineEnd < first.to) {
+    const rest = inline(first, source, format, lineEnd).replace(/^\n/, "");
+    parts.push(format === "html" ? `<p>${rest}</p>` : rest);
+  }
+  for (let child = first.nextSibling; child; child = child.nextSibling) {
+    if (MARKS.has(child.name) || UNSEEN.has(child.name)) continue;
+    parts.push(block(child, source, format));
+  }
+  const body = parts.filter((part) => part !== "");
+  if (format === "html") return `<p><strong>${title}</strong></p>${body.join("")}`;
+  return [`*${title}*`, body.join("\n\n")].filter((part) => part !== "").join("\n");
+}
+
+/**
+ * A callout title's span. Slack's bold cannot hold a bold or an italic of its
+ * own, the inner `*` closing it early, so emphasis there goes out as its text.
+ */
+function plain(node: SyntaxNode, source: string, format: Format): string {
+  if (format === "slack" && (node.name === "StrongEmphasis" || node.name === "Emphasis")) {
+    return inline(node, source, format, node.from, node.to, plain);
+  }
+  return span(node, source, format);
 }
 
 function list(node: SyntaxNode, source: string, format: Format): string {
