@@ -13,7 +13,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi import Path as Segment
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.requests import ClientDisconnect
 from youtube_transcript_api import (
     CouldNotRetrieveTranscript,
@@ -45,6 +45,7 @@ from kasten_backend.files import (
 from kasten_backend.frontmatter import bases, reserved, stamp, unstamped
 from kasten_backend.graph import MOST_DEPTH, Graph, GraphError, query_graph
 from kasten_backend.guide import write_guide
+from kasten_backend.history import HistoryError, list_changes, plain, read_version
 from kasten_backend.indexes import carries, drop_entries, rehome_entry
 from kasten_backend.links import plan_move, relink_move
 from kasten_backend.mentions import find_mentions
@@ -242,6 +243,18 @@ class NoteEdit(BaseModel):
 
     A save that names one is refused when the disk has moved past it. None
     writes unconditionally, as the agent API and the todo writes do.
+    """
+
+
+class NoteSave(NoteEdit):
+    """A save's body, which may say the text is a restore from the history pane."""
+
+    restored_from: Annotated[str | None, Field(pattern=r"^[k-z]{1,64}$")] = None
+    """The short id of the jj change the text was restored from, or None.
+
+    Names the change after the restore, which keeps it out of the change in hand:
+    amended in, the restore would leave the text it replaced in no change. The
+    pattern is jj's change-id alphabet, so nothing else reaches a description.
     """
 
 
@@ -752,6 +765,96 @@ async def list_mentions(
         None if archive else settings.archive_path,
     )
     return [Mention(**mention._asdict()) for mention in found]
+
+
+class HistoryChange(BaseModel):
+    """One jj change that touched a note."""
+
+    commit: str
+    """The commit id, 40 hex digits, which is what reads the note's text back."""
+
+    change: str
+    """The short change id, the name `jj log` shows."""
+
+    time: str
+    """When it was last written, ISO 8601 with the offset."""
+
+    description: str
+    """The first line of the change's description."""
+
+    path: str
+    """Where the note was in that change, which differs from now across a move."""
+
+
+class History(BaseModel):
+    """A note's changes, newest first, and whether the vault keeps any at all."""
+
+    versioned: bool
+    changes: list[HistoryChange]
+
+
+class Version(BaseModel):
+    """A note's full text at one change."""
+
+    content: str
+
+
+def history_path(root: Path, path: str) -> str:
+    """The vault's own spelling of a note path, or a 404 for one it would not take.
+
+    The note need not exist now: the history pane reads it at the path it had
+    before a move.
+    """
+    note = resolve_path(root, path)
+    if note is None or not plain(path):
+        raise HTTPException(status_code=404, detail="No such note")
+
+    return relative_path(root, note)
+
+
+@app.get("/api/history")
+async def read_history(path: str, settings: Annotated[Settings, Depends(get_settings)]) -> History:
+    """List the jj changes that touched a note, newest first, following it through moves.
+
+    A vault that is not a repo, or a box without jj, answers `versioned: false`
+    rather than an error, the history being a thing the vault may not keep.
+    """
+    try:
+        changes = await list_changes(settings.vault_path, history_path(settings.vault_path, path))
+    except HistoryError as error:
+        raise HTTPException(status_code=503, detail="The note's history is out of reach") from error
+
+    if changes is None:
+        return History(versioned=False, changes=[])
+
+    return History(
+        versioned=True, changes=[HistoryChange(**change._asdict()) for change in changes]
+    )
+
+
+@app.get("/api/history/version")
+async def read_history_version(
+    path: str,
+    commit: Annotated[str, Query(pattern=r"^[0-9a-f]{40}$")],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Version:
+    """Read a note's text at one of the changes `/api/history` listed.
+
+    `path` is the one that change lists, which is not the note's path now when
+    a move came after it. The pattern on `commit` is what keeps anything but a
+    commit id out of the revset.
+    """
+    try:
+        content = await read_version(
+            settings.vault_path, history_path(settings.vault_path, path), commit
+        )
+    except HistoryError as error:
+        raise HTTPException(status_code=503, detail="The note's history is out of reach") from error
+
+    if content is None:
+        raise HTTPException(status_code=404, detail="No such version")
+
+    return Version(content=content)
 
 
 @app.get("/api/todos")
@@ -1295,7 +1398,7 @@ async def create_file(
 
 @app.put("/api/files/{path:path}")
 async def save_file(
-    path: str, edit: NoteEdit, settings: Annotated[Settings, Depends(get_settings)]
+    path: str, edit: NoteSave, settings: Annotated[Settings, Depends(get_settings)]
 ) -> Note:
     """Write one note back to the vault.
 
@@ -1352,7 +1455,13 @@ async def save_file(
 
         content = edit.content if reserved(relative) else stamp(edit.content, current)
 
-        async with vault_change(settings.vault_path, relative):
+        # A label unlike the plain save's opens a change for the restore, and the
+        # next plain save opens another, which seals the restore in its own.
+        label = relative
+        if edit.restored_from is not None:
+            label = f"{relative} (restored from {edit.restored_from})"
+
+        async with vault_change(settings.vault_path, label):
             write_note(note, content)
 
     return Note(path=path, content=content)

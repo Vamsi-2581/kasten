@@ -346,6 +346,43 @@ export async function previewMove(source: string, target: string): Promise<strin
   return data.rewrites;
 }
 
+/** One jj change that touched a note, as the history pane lists it. */
+export type HistoryChange = components["schemas"]["HistoryChange"];
+
+/** A note's changes, newest first, and whether the vault keeps any at all. */
+export type History = components["schemas"]["History"];
+
+/** Every jj change that touched `path`, newest first. */
+export async function fetchHistory(path: string): Promise<History> {
+  const { data, response } = await client.GET("/api/history", {
+    params: { query: { path } },
+  });
+
+  if (!data) {
+    throw new Error(`GET /api/history failed with ${response.status}`);
+  }
+
+  return data;
+}
+
+/**
+ * The whole text of the note as change `commit` left it.
+ *
+ * `path` is the one the change lists, which is not the note's path now when a
+ * move came after it.
+ */
+export async function fetchHistoryText(path: string, commit: string): Promise<string> {
+  const { data, response } = await client.GET("/api/history/version", {
+    params: { query: { path, commit } },
+  });
+
+  if (!data) {
+    throw new Error(`GET /api/history/version failed with ${response.status}`);
+  }
+
+  return data.content;
+}
+
 /**
  * A save refused because somebody else wrote the note since its base.
  *
@@ -374,16 +411,24 @@ export class ChangedOnDisk extends Error {
  * set aside (`unstamped`), and makes the write conditional: a vault that has
  * moved past it refuses with `ChangedOnDisk`. Without one the write lands
  * whatever is there.
+ *
+ * `restoredFrom` is the jj change id the text was read from, which only the
+ * history pane's restore sends: the backend then records the write as a change
+ * of its own, so the text it replaced stays in the change below.
  */
 export async function saveNote(
   path: string,
   content: string,
   keepalive = false,
   base?: string,
+  restoredFrom?: string,
 ): Promise<Note> {
+  const body: components["schemas"]["NoteSave"] = { content };
+  if (base !== undefined) body.base = base;
+  if (restoredFrom !== undefined) body.restored_from = restoredFrom;
   const { data, response } = await client.PUT("/api/files/{path}", {
     params: { path: { path } },
-    body: base === undefined ? { content } : { content, base },
+    body,
     keepalive,
   });
 

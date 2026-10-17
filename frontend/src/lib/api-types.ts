@@ -568,6 +568,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read History
+         * @description List the jj changes that touched a note, newest first, following it through moves.
+         *
+         *     A vault that is not a repo, or a box without jj, answers `versioned: false`
+         *     rather than an error, the history being a thing the vault may not keep.
+         */
+        get: operations["read_history_api_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/history/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read History Version
+         * @description Read a note's text at one of the changes `/api/history` listed.
+         *
+         *     `path` is the one that change lists, which is not the note's path now when
+         *     a move came after it. The pattern on `commit` is what keeps anything but a
+         *     commit id out of the revset.
+         */
+        get: operations["read_history_version_api_history_version_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/todos": {
         parameters: {
             query?: never;
@@ -1407,6 +1454,32 @@ export interface components {
             status: string;
         };
         /**
+         * History
+         * @description A note's changes, newest first, and whether the vault keeps any at all.
+         */
+        History: {
+            /** Versioned */
+            versioned: boolean;
+            /** Changes */
+            changes: components["schemas"]["HistoryChange"][];
+        };
+        /**
+         * HistoryChange
+         * @description One jj change that touched a note.
+         */
+        HistoryChange: {
+            /** Commit */
+            commit: string;
+            /** Change */
+            change: string;
+            /** Time */
+            time: string;
+            /** Description */
+            description: string;
+            /** Path */
+            path: string;
+        };
+        /**
          * Hit
          * @description One matching line: where it lives, which line it is, and what it says.
          *
@@ -1539,6 +1612,18 @@ export interface components {
             sha: string;
         };
         /**
+         * NoteSave
+         * @description A save's body, which may say the text is a restore from the history pane.
+         */
+        NoteSave: {
+            /** Content */
+            content: string;
+            /** Base */
+            base?: string | null;
+            /** Restored From */
+            restored_from?: string | null;
+        };
+        /**
          * Page
          * @description One web page as it arrived, for the client to make a note out of.
          */
@@ -1638,6 +1723,14 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * Version
+         * @description A note's full text at one change.
+         */
+        Version: {
+            /** Content */
+            content: string;
         };
     };
     responses: never;
@@ -2317,6 +2410,69 @@ export interface operations {
             };
         };
     };
+    read_history_api_history_get: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["History"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_history_version_api_history_version_get: {
+        parameters: {
+            query: {
+                path: string;
+                commit: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Version"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_todos_api_todos_get: {
         parameters: {
             query?: {
@@ -2728,7 +2884,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NoteEdit"];
+                "application/json": components["schemas"]["NoteSave"];
             };
         };
         responses: {
