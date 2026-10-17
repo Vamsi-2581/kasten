@@ -126,6 +126,52 @@ describe("live preview", () => {
     await waitFor(() => expect(content(container)).toBe("see [the docs](https://example.com) now"));
   });
 
+  // The parser reads every `[text]` with no `(url)` as a link (#434, #435).
+  // The line above keeps the cursor off the line under test.
+  it.each([
+    [
+      "A8 a [!note] under a plain quote line",
+      "> plain\n> [!note] not a callout",
+      "[!note] not a callout",
+    ],
+    ["A9 a [text] on a quote line", "> see [text] here", "see [text] here"],
+    ["I1 a [text] on a plain line", "see [text] here", "see [text] here"],
+    ["I1 a [text][ref] full reference", "see [text][ref] here", "see [text][ref] here"],
+  ])("keeps the brackets of %s", (_, doc, shown) => {
+    const { container } = renderEditor(<Editor initialDoc={`intro\n\n${doc}`} />);
+
+    expect(content(container)).toContain(shown);
+    expect(container.querySelector(".cm-link")).toBeNull();
+  });
+
+  it("I1 keeps the brackets of a [text] in a table cell", () => {
+    const lines = ["before", "", "| a |", "| - |", "| [text] |"];
+    const { container } = renderEditor(<Editor initialDoc={lines.join("\n")} />);
+
+    const table = container.querySelector(".cm-table-grid") as HTMLTableElement;
+    expect(table.querySelector("tbody td")?.textContent).toBe("[text]");
+    expect(table.querySelector(".cm-link")).toBeNull();
+  });
+
+  it("B1 [a]() draws as a link, its marks hidden, in prose and in a cell", () => {
+    // CommonMark reads empty parens as a link with an empty address.
+    const lines = ["intro", "", "see [a]() here", "", "| x |", "| - |", "| [b]() |"];
+    const { container } = renderEditor(<Editor initialDoc={lines.join("\n")} />);
+
+    expect(content(container)).toContain("see a here");
+    expect(container.querySelector(".cm-line .cm-link")?.textContent).toBe("a");
+    expect(container.querySelector(".cm-table-grid tbody .cm-link")?.textContent).toBe("b");
+  });
+
+  it("I3 draws a [text](url) link as its text in cm-link, as before", () => {
+    const { container } = renderEditor(
+      <Editor initialDoc={"intro\n\n> see [the docs](https://example.com) now"} />,
+    );
+
+    expect(content(container)).toContain("see the docs now");
+    expect(container.querySelector(".cm-link")?.textContent).toBe("the docs");
+  });
+
   it("leaves the constructs the cursor is not in rendered", async () => {
     const { container } = renderEditor(<Editor initialDoc="**bold** and *italic*" />);
 
