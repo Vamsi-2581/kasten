@@ -246,3 +246,38 @@ describe("a wikilink's alias and heading", () => {
     }
   });
 });
+
+describe("math", () => {
+  it("A9 keeps inline math as its source, its stars no emphasis", () => {
+    expect(toSlack("so $a*b*c$ holds")).toBe("so `$a*b*c$` holds");
+    expect(toHtml("so $a<b*c*$ holds")).toBe("<p>so <code>$a&lt;b*c*$</code> holds</p>");
+  });
+
+  it("A9 keeps a math block as its source", () => {
+    const note = "before\n\n$$\na_1 * b_2 * c\n$$\n\nafter";
+    expect(toSlack(note)).toBe("before\n\n```\n$$\na_1 * b_2 * c\n$$\n```\n\nafter");
+    expect(toHtml(note)).toBe(
+      "<p>before</p><pre><code>$$\na_1 * b_2 * c\n$$</code></pre><p>after</p>",
+    );
+  });
+
+  it("R2 keeps one quote mark on each line of a math block in a callout", () => {
+    expect(toSlack("> [!note]\n> $$\n> x^2\n> $$")).toBe(
+      "> *Note*\n> ```\n> $$\n> x^2\n> $$\n> ```",
+    );
+  });
+
+  it("R3 keeps one indent on each line of a math block in a list", () => {
+    expect(toSlack("- item\n  $$\n  x\n  $$")).toBe(
+      "• item\n    ```\n    $$\n    x\n    $$\n    ```",
+    );
+  });
+
+  it("R4 leaves a lazy line opening with two dollars in its list item", () => {
+    expect(toSlack("- item\n$$ lazy\n- next")).toBe("• item\n    $$ lazy\n• next");
+  });
+
+  it("R5 opens no formula that would cut through a wikilink", () => {
+    expect(toSlack("costs $5 per [[Item]], x$ each")).toBe("costs $5 per Item, x$ each");
+  });
+});

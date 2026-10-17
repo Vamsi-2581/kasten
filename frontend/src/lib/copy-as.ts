@@ -14,13 +14,14 @@ import type { SyntaxNode } from "@lezer/common";
 import { GFM, parser } from "@lezer/markdown";
 import { parseCallout } from "@/lib/callout";
 import { Highlight } from "@/lib/markdown-highlight";
+import { MathSyntax } from "@/lib/math";
 import { noteBody } from "@/lib/note-frontmatter";
 import { Tag } from "@/lib/tag";
 import { splitTarget, WikiLink } from "@/lib/wikilink";
 
 type Format = "slack" | "html";
 
-const notes = parser.configure([GFM, Highlight, Tag, WikiLink]);
+const notes = parser.configure([GFM, Highlight, MathSyntax, Tag, WikiLink]);
 
 /** Syntax a parent spells out in the target's own terms, or drops. */
 const MARKS = new Set([
@@ -160,6 +161,10 @@ function span(node: SyntaxNode, source: string, format: Format): string {
     }
     case "URL":
       return link("", text, format);
+    // Neither chat draws math, so a formula goes out as the source it was
+    // written in, as code: Slack would read the `*` of `$a*b*c$` as bold.
+    case "InlineMath":
+      return wrap(format === "html" ? escapeHtml(text) : text, format, "`", "code");
     case "Escape":
       return prose(text.slice(1), format);
     case "HardBreak":
@@ -206,6 +211,22 @@ function block(node: SyntaxNode, source: string, format: Format): string {
         .join("\n");
       // No language after the fence: Slack would print it as the first line.
       return html ? `<pre><code>${escapeHtml(code)}</code></pre>` : `\`\`\`\n${code}\n\`\`\``;
+    }
+    case "BlockMath": {
+      // The lines under the first carry the `>` and the indent of the quote
+      // or list the formula sits in, up to the column it opens at, which the
+      // quote or list puts back on its own.
+      const column = node.from - (source.lastIndexOf("\n", node.from - 1) + 1);
+      const text = source
+        .slice(node.from, node.to)
+        .split("\n")
+        .map((line, index) => {
+          if (index === 0) return line;
+          const prefix = /^[ \t>]*/.exec(line)?.[0].length ?? 0;
+          return line.slice(Math.min(column, prefix));
+        })
+        .join("\n");
+      return html ? `<pre><code>${escapeHtml(text)}</code></pre>` : `\`\`\`\n${text}\n\`\`\``;
     }
     case "HorizontalRule":
       return html ? "<hr>" : "---";
