@@ -1245,6 +1245,16 @@ reopening a todo something waits on rewrites
 this note is part of the same buffer edit, so one `u` takes back all of it. A
 dependent in another note is a write the buffer cannot reach, like the log.
 
+The log and the dependents are found by the todo's `🆔`, so a press whose `🆔`
+stands on another todo line too, a pasted copy, moves neither, in this note or
+any other. The line in the buffer stays as the press left it, and the notice
+says `Nothing moved: 🆔 <id> is on another todo too: <note> line <n>`. The copy
+is read off the buffer, so one pasted a moment ago counts and one you just
+changed does not. Fix the id on one of the two, then cycle the todo back round
+or tick it from the pane: a second press now would walk the line on past done.
+A log or dependent write the vault refuses says `Nothing moved:` and the
+vault's reason.
+
 `<leader>i` stamps an id on the todo the cursor is on, and does nothing to a
 line that is not a todo or that carries one already. It is how you name a todo
 that is still open, so a `⛔` on another line has something to point at.
@@ -1454,6 +1464,13 @@ there is no clock ticking on it, and a session lands in `⏱` when it is stopped
 Where a write since the list was drawn moved the row's todo so that `t` cannot
 tell which line it is, `t` writes nothing and the notice says
 `Nothing moved: that line has changed since it was listed`, as a state key does.
+
+`t`, `x`, a state key and a dropped card find a todo's sessions, log line and
+dependents by its `🆔`. Where that `🆔` stands on another todo line too, a
+pasted copy in the same note or in another, the press writes nothing and the
+notice says `Nothing moved: 🆔 <id> is on another todo too: <note> line <n>`,
+with `, and 2 more` where it stands on three others. Session, log and `⛔` lines
+name the id without carrying it, and do not count.
 
 The cell between the count and the date is the two clocks: `⏱ 1h20m / 2h` with
 both, `⏱ 1h20m` with only the worked total, `⏲ 2h` with only an estimate, and

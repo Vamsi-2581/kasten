@@ -321,6 +321,21 @@ export interface CycleLinesInput {
   closed: Closed;
   /** The state the key named, or nothing where the key walks the cycle. */
   state?: TodoState;
+  /**
+   * Whether the pressed todo's id stands on another todo line too, here or in
+   * another note. Its dependents may be waiting on the other, so none moves.
+   */
+  shared?: boolean;
+}
+
+/**
+ * Whether the todo on `line` carries an id another todo line in `lines` carries
+ * too. Such a press cannot tell whose log line or dependents it moves, so it
+ * moves only its own line and what hangs off it. See `otherTodoWithId`.
+ */
+export function twinnedIn(lines: string[], line: number): boolean {
+  const id = parseTodo(lines[line - 1] ?? "")?.id;
+  return id !== undefined && otherTodoWithId(id, "", line, [], lines.join("\n")) !== null;
 }
 
 /** The line one press writes, whether it walks the cycle or names a state. */
@@ -375,6 +390,7 @@ export function cycleLines({
   id,
   closed,
   state,
+  shared = false,
 }: CycleLinesInput): Map<number, string> {
   const before = lines[line - 1] ?? "";
   const was = parseTodo(before);
@@ -408,8 +424,8 @@ export function cycleLines({
   // From the blocker's side and only from there: closing or reopening a todo
   // that carries an id is what moves the lines waiting on it. A press that
   // leaves the line no longer a todo moves nothing, nothing being able to
-  // resolve it any more.
-  if (was !== null && now?.id !== undefined && isOpen(was) !== isOpen(now)) {
+  // resolve it any more. Nor does one whose id is `shared`.
+  if (!shared && was !== null && now?.id !== undefined && isOpen(was) !== isOpen(now)) {
     const after = [...lines];
     for (const [at, insert] of moved) after[at - 1] = insert;
     // The press is newer than whatever the caller can see, so this one id is
@@ -475,6 +491,48 @@ export function cycleTodoWrites(input: CycleInput): Write[] {
   }
 
   return [...writes].map(([writePath, writeText]) => ({ path: writePath, text: writeText }));
+}
+
+/** One line the vault answered with, where it was found. */
+export interface LineHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/**
+ * Where else `id` stands on a todo line, as the sentence a refused press says.
+ * Null where the pressed todo is the only one carrying it.
+ *
+ * Sessions, log lines and dependents name the id without carrying it, and none
+ * of them parses to a todo with this id, so none counts. A press goes by id to
+ * find its sessions and its dependents, and a pasted copy of the line would
+ * share both: neither line can be told from the other, so the press refuses
+ * rather than guess, and re-stamping one would break whatever names the id.
+ *
+ * `text` is the pressed note as the press just read it, or the buffer it was
+ * typed into, and its other lines win over the hits for that note, which can
+ * lag a write behind.
+ */
+export function otherTodoWithId(
+  id: string,
+  path: string,
+  line: number,
+  hits: LineHit[],
+  text: string,
+): string | null {
+  const carries = (found: string) => parseTodo(found)?.id === id;
+  const here = text
+    .split("\n")
+    .flatMap((found, index) =>
+      index + 1 !== line && carries(found) ? [{ path, line: index + 1 }] : [],
+    );
+  const others = [...here, ...hits.filter((hit) => hit.path !== path && carries(hit.text))];
+
+  const [first] = others;
+  if (first === undefined) return null;
+  const more = others.length > 1 ? `, and ${others.length - 1} more` : "";
+  return `🆔 ${id} is on another todo too: ${first.path} line ${first.line}${more}`;
 }
 
 /** One line `searchNotes` answered with, and the note it was found in. */

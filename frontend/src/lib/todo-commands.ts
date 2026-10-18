@@ -4,7 +4,14 @@ import { readClock } from "@/lib/clock";
 import { appendUnderEdit, type Edit } from "@/lib/note-section";
 import { periodicNote } from "@/lib/periodic";
 import { nameAt, newId, parseTodo, patchLine, type TodoState } from "@/lib/todo";
-import { closedAmong, cycleLines, doneLine, doneLineEdits, pressedLine } from "@/lib/todo-write";
+import {
+  closedAmong,
+  cycleLines,
+  doneLine,
+  doneLineEdits,
+  pressedLine,
+  twinnedIn,
+} from "@/lib/todo-write";
 
 /** Where the box ends on a line that has one, which is where the words start. */
 const BOX = /^[ \t]*- \[.\] /;
@@ -18,6 +25,11 @@ export interface TodoCycle {
   after: string;
   /** Which line it is, counting from one, the way a `SearchHit` counts. */
   line: number;
+  /**
+   * The whole buffer before the press. The route asks it whether the id stands
+   * on another todo line too: the disk can be an autosave behind the buffer.
+   */
+  doc: string;
 }
 
 export type CycleHandler = (cycle: TodoCycle) => void;
@@ -43,6 +55,19 @@ export const todoCycled = Facet.define<CycleHandler, CycleHandler | undefined>({
  */
 export const notePath = Facet.define<string, string | undefined>({
   combine: (paths) => paths[0],
+});
+
+/**
+ * Whether an id stands on a todo line in another note, as far as the page's
+ * listing of the vault says. The press is synchronous and cannot ask the vault,
+ * and a listing it does not hold answers no: the route asks the vault afresh
+ * before it writes anything beyond the buffer.
+ */
+export const idElsewhere = Facet.define<
+  (id: string) => boolean,
+  ((id: string) => boolean) | undefined
+>({
+  combine: (answers) => answers[0],
 });
 
 /**
@@ -107,6 +132,13 @@ export function cycleTodoAtCursor(view: EditorView, want?: TodoState): void {
   // conservative answer and the right one: a line is opened only when every
   // blocker on it can be seen closed.
   const lines = doc.split("\n");
+  // An id another todo line carries too, in here or in another note: the press
+  // moves its own line and what hangs off it, no log line and no dependent, and
+  // the route refuses the rest and says why.
+  const carried = parseTodo(line.text)?.id;
+  const shared =
+    twinnedIn(lines, line.number) ||
+    (carried !== undefined && state.facet(idElsewhere)?.(carried) === true);
   const moved = cycleLines({
     lines,
     line: line.number,
@@ -114,6 +146,7 @@ export function cycleTodoAtCursor(view: EditorView, want?: TodoState): void {
     id,
     closed: closedAmong(lines.flatMap((text) => parseTodo(text) ?? [])),
     state: want,
+    shared,
   });
 
   const changes = ChangeSet.of(
@@ -122,7 +155,7 @@ export function cycleTodoAtCursor(view: EditorView, want?: TodoState): void {
         const held = state.doc.line(at);
         return { from: held.from, to: held.to, insert };
       }),
-      ...logEdits(doc, line.text, cycled, path),
+      ...(shared ? [] : logEdits(doc, line.text, cycled, path)),
     ],
     state.doc.length,
   );
@@ -146,7 +179,7 @@ export function cycleTodoAtCursor(view: EditorView, want?: TodoState): void {
     },
   });
 
-  cycleHandler?.({ before: line.text, after: cycled, line: line.number });
+  cycleHandler?.({ before: line.text, after: cycled, line: line.number, doc });
 }
 
 /**
