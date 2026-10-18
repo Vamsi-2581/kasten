@@ -162,6 +162,101 @@ describe("bracketed text with no address", () => {
   });
 });
 
+describe("a reference link with a definition (#439)", () => {
+  const DEFINED = "[docs]: https://example.com";
+
+  it.each([
+    ["a shortcut", "see [docs] here", "docs"],
+    ["a full", "see [the docs][docs] here", "the docs"],
+    ["a collapsed", "see [docs][] here", "docs"],
+  ])(
+    "A9 gives Slack and Teams %s reference as its link, the definition left out",
+    (_, doc, text) => {
+      const note = `${doc}\n\n${DEFINED}`;
+
+      expect([toSlack(note), toHtml(note)]).toEqual([
+        `see ${text} (https://example.com) here`,
+        `<p>see <a href="https://example.com">${text}</a> here</p>`,
+      ]);
+    },
+  );
+
+  it("A7 keeps the brackets of an undefined [text] beside a defined one", () => {
+    const slack = toSlack(`[text] and [docs]\n\n${DEFINED}`);
+    const html = toHtml(`[text] and [docs]\n\n${DEFINED}`);
+
+    expect(slack.startsWith("[text] and ")).toBe(true);
+    expect(html.startsWith("<p>[text] and ")).toBe(true);
+    expect([slack, html]).toEqual([
+      "[text] and docs (https://example.com)",
+      '<p>[text] and <a href="https://example.com">docs</a></p>',
+    ]);
+  });
+
+  it("A9 resolves a part of a note against the whole note's definitions", () => {
+    const note = `see [docs] here\n\n${DEFINED}`;
+
+    expect([toSlack("see [docs] here", note), toHtml("see [docs] here", note)]).toEqual([
+      "see docs (https://example.com) here",
+      '<p>see <a href="https://example.com">docs</a> here</p>',
+    ]);
+  });
+
+  it("copies a javascript:, data: or vbscript: address as its text (#549)", () => {
+    const note = [
+      "[safe] [inline](javascript:alert(1)) [ref] [d] [vb]",
+      "",
+      "[safe]: https://example.com",
+      "",
+      "[ref]: JavaScript:alert(1)",
+      "",
+      "[d]: data:text/html,x",
+      "",
+      "[vb]: vbscript:x",
+    ].join("\n");
+
+    expect(toSlack("[safe]\n\n[safe]: https://example.com")).toBe("safe (https://example.com)");
+    expect([toSlack(note), toHtml(note)]).toEqual([
+      "safe (https://example.com) inline ref d vb",
+      '<p><a href="https://example.com">safe</a> inline ref d vb</p>',
+    ]);
+  });
+
+  it("A9 keeps a selection's own definitions beside the note's", () => {
+    const part = "see [a]\n\n[a]: https://a.example";
+    const note = `intro\n\n\`\`\`md\n${part}\n\`\`\``;
+
+    expect(toSlack(part, note)).toBe("see a (https://a.example)");
+  });
+
+  it("keeps a footnote as typed though its label is defined", () => {
+    const note = `claim[^1] and [docs]\n\n[^1]: https://source.example\n\n${DEFINED}`;
+
+    expect([toSlack(note), toHtml(note)]).toEqual([
+      "claim[^1] and docs (https://example.com)",
+      '<p>claim[^1] and <a href="https://example.com">docs</a></p>',
+    ]);
+  });
+
+  it("I6 takes the first of two definitions of one label", () => {
+    const note = "[a]\n\n[a]: https://one.example\n\n[A]: https://two.example";
+
+    expect([toSlack(note), toHtml(note)]).toEqual([
+      "a (https://one.example)",
+      '<p><a href="https://one.example">a</a></p>',
+    ]);
+  });
+
+  it("I7 resolves a definition with a title to its address", () => {
+    const note = '[a]\n\n[a]: https://x.example "Title"';
+
+    expect([toSlack(note), toHtml(note)]).toEqual([
+      "a (https://x.example)",
+      '<p><a href="https://x.example">a</a></p>',
+    ]);
+  });
+});
+
 describe("an image with no address, and an address in angle brackets", () => {
   it("#442 gives Slack ![alt] as written", () => {
     expect(toSlack("see ![alt] here")).toBe("see ![alt] here");
