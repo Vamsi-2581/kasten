@@ -6,6 +6,7 @@ import {
   blockLine,
   type Closed,
   type CycleInput,
+  closedAmong,
   closeSessions,
   cycleLines,
   cycleTodoWrites,
@@ -281,6 +282,27 @@ describe("cycleLines", () => {
     );
   });
 
+  it("writes the next copy of a recurring todo ticked out of review as open", () => {
+    const note = ["- [r] water the plants 🔁 every week 📅 2026-08-10"];
+
+    expect(cycle(note, 1).get(1)?.split("\n")).toEqual([
+      "- [ ] water the plants 📅 2026-08-17 🔁 every week",
+      `- [x] water the plants 🔁 every week 📅 2026-08-10 ✅ ${TODAY} 🆔 kt-3f9a2c`,
+    ]);
+  });
+
+  it("ticks a part waiting for review with the parent", () => {
+    const note = ["- [/] wire up the pane", "\t- [r] write it ^blk1", "\t- [ ] ship it"];
+
+    expect(set(note, 1, "done")).toEqual(
+      new Map([
+        [1, `- [x] wire up the pane ✅ ${TODAY} 🆔 kt-3f9a2c`],
+        [2, `\t- [x] write it ✅ ${TODAY} ^blk1`],
+        [3, `\t- [x] ship it ✅ ${TODAY}`],
+      ]),
+    );
+  });
+
   it("writes no copy on the press that leaves done", () => {
     const note = [`- [x] water the plants 🔁 every week 📅 2026-08-10 ✅ ${TODAY} 🆔 kt-000001`];
 
@@ -374,6 +396,24 @@ describe("cycleTodoWrites", () => {
       path: NOTE_PATH,
       text: NOTE.replace(
         "- [/] wire up the pane 📅 2026-08-14 ⏫ #kasten",
+        "- [x] wire up the pane 📅 2026-08-14 ⏫ ✅ 2026-08-10 🆔 kt-3f9a2c #kasten",
+      ),
+    });
+    expect(writes[1]).toEqual({
+      path: DAILY_PATH,
+      text: `${FRESH_DAILY.replace(/\n+$/, "")}\n\n## Done\n- ✅ 2026-08-10 wire up the pane #kasten [[projects/kasten]] kt-3f9a2c\n`,
+    });
+  });
+
+  it("logs a todo ticked out of review under today's Done heading, as out of doing", () => {
+    const review = NOTE.replace("- [/] wire up the pane", "- [r] wire up the pane");
+    const writes = cycleTodoWrites(press({ text: review }));
+
+    expect(writes).toHaveLength(2);
+    expect(writes[0]).toEqual({
+      path: NOTE_PATH,
+      text: review.replace(
+        "- [r] wire up the pane 📅 2026-08-14 ⏫ #kasten",
         "- [x] wire up the pane 📅 2026-08-14 ⏫ ✅ 2026-08-10 🆔 kt-3f9a2c #kasten",
       ),
     });
@@ -652,6 +692,15 @@ describe("blockedLines", () => {
       new Map([[1, "- [ ] ship it ⛔ kt-000001 ⛔ kt-000003"]]),
     );
     expect(blockedLines(dangling, CLOSED)).toEqual(new Map());
+  });
+
+  it("holds a dependent at blocked while its blocker waits for review", () => {
+    const closed = closedAmong([todo("- [r] ship it 🆔 kt-000001")]);
+
+    expect(blockedLines(["- [ ] write the docs ⛔ kt-000001"], closed)).toEqual(
+      new Map([[1, "- [b] write the docs ⛔ kt-000001"]]),
+    );
+    expect(blockedLines(["- [b] write the docs ⛔ kt-000001"], closed)).toEqual(new Map());
   });
 
   it("leaves a line carrying no blocker alone, hand-set blocked included", () => {
