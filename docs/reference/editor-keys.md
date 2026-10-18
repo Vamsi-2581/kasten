@@ -1567,7 +1567,8 @@ of panes is already lost on a reload, so a reload comes back to an empty pane
 and `<leader>gt` is one press.
 
 The list is read again on every write the vault reports over `/api/events`, so a
-todo written by an agent or over ssh appears without a reload.
+todo written by an agent or over ssh appears without a reload. A folder move or
+a deleted note reads it again too, as either can change a todo's project.
 
 ### The board
 
@@ -1579,8 +1580,8 @@ whose start date has not come stays off, as it does in the list.
 The rows are lanes. The board opens with a lane for each of `#client`,
 `#internal` and `#private` that has cards, then `No kind` for the rest. A part
 with no kind tag sits in its parent's lane. `g` switches to a lane per project
-and back, with `No project` first; the
-[four steps](/reference/todo-format.md#projects) say which project a todo is in.
+and back, with `No project` first. The backend says which project a todo is
+in, by the [five steps](/reference/todo-format.md#projects).
 
 Every todo is a card, a part too. A card shows the priority, the words, the
 count of its parts, what it waits for after a `⛔`, and the due date cut as the
