@@ -30,6 +30,7 @@ import { noteLanguage } from "@/lib/note-language";
 import { noteSectionOf } from "@/lib/note-section";
 import { relationCompletions, vaultRelations } from "@/lib/ontology";
 import { type CopyFormat, slashCompletions, viewCommands } from "@/lib/palette";
+import { readPosition, writePosition } from "@/lib/positions";
 import { moveCell } from "@/lib/table";
 import { tagCompletions, vaultTags } from "@/lib/tag";
 import { type CycleHandler, notePath, todoCycled } from "@/lib/todo-commands";
@@ -785,6 +786,8 @@ export function Editor({
   // the view throws away undo history and cursor position, so it must happen
   // exactly once: to open a different note, remount with a `key`.
   const initialDocRef = useRef(initialDoc);
+  const startLineRef = useRef(startLine);
+  const focusedRef = useRef(focused);
   const renderedRef = useRef(rendered);
   const pathsRef = useRef(paths);
   const imagesRef = useRef(images);
@@ -829,10 +832,63 @@ export function Editor({
     const parent = host.current;
     if (!parent) return;
 
+    // Where this note was left, unless the open names a line: a search hit or
+    // a URL says where to read, and the effect further down puts the cursor
+    // there. Read and not restored only to be moved, which would scroll twice.
+    const saved =
+      path === undefined || startLineRef.current !== undefined ? undefined : readPosition(path);
+    // A note edited elsewhere since can end before the saved cursor, and
+    // CodeMirror throws on a selection past the end rather than clamping.
+    const length = initialDocRef.current.length;
+    // The scroller's offset as last seen, kept here and not read at the end:
+    // React runs the cleanup after the host has left the page, and a detached
+    // element reports 0, which would overwrite every note's scroll with the top.
+    let top = saved?.top ?? 0;
+    // Whether the saved scroll has reached the screen. A pane hidden behind a
+    // zoom mounts with no box, where an offset does not take, and gets it
+    // when it first shows. Until then its scroller reads 0, which is not
+    // where the reader left it, so nothing it reports counts.
+    let shown = saved === undefined;
+    // What the store holds for this note as far as this editor knows, so a
+    // close that moved nothing writes nothing.
+    let written = saved;
+    let pending: ReturnType<typeof setTimeout> | undefined;
+    // `view` is assigned below; none of these runs before it is.
+    function keep() {
+      clearTimeout(pending);
+      pending = undefined;
+      if (path === undefined) return;
+      const { anchor, head } = view.state.selection.main;
+      if (written?.anchor === anchor && written.head === head && written.top === top) return;
+      written = { anchor, head, top };
+      writePosition(path, written);
+    }
+    function reveal() {
+      if (shown || saved === undefined || view.scrollDOM.clientHeight === 0) return;
+      shown = true;
+      view.scrollDOM.scrollTop = saved.top;
+      // Again once the lines are measured: until then their heights are
+      // guesses, and the offset can land short of where it was.
+      view.requestMeasure({
+        read: () => {},
+        write: () => {
+          view.scrollDOM.scrollTop = saved.top;
+        },
+      });
+    }
+    // Trailing and not reset while pending, so a held `j` or a long scroll
+    // writes twice a second and not once per line. The close and `pagehide`
+    // write what the timer had not got to.
+    function soon() {
+      if (path !== undefined && pending === undefined) pending = setTimeout(keep, 500);
+    }
+
     const view = new EditorView({
       state: EditorState.create({
         doc: initialDocRef.current,
-        selection: { anchor: noteStart(initialDocRef.current) },
+        selection: saved
+          ? { anchor: Math.min(saved.anchor, length), head: Math.min(saved.head, length) }
+          : { anchor: noteStart(initialDocRef.current) },
         extensions: [
           // Must come first: whichever keymap is registered earliest wins, and
           // vim's bindings have to beat the ones basicSetup installs.
@@ -1000,6 +1056,14 @@ export function Editor({
               onChangeRef.current?.(update.state.doc.toString());
             }
           }),
+          // Vim's normal-mode cursor is this same selection, so one listener
+          // serves vim on and off.
+          EditorView.updateListener.of((update) => {
+            if (update.selectionSet) soon();
+            // A hidden pane coming into view is a change of size, which
+            // CodeMirror measures and reports as geometry.
+            if (update.geometryChanged) reveal();
+          }),
         ],
       }),
       parent,
@@ -1007,10 +1071,28 @@ export function Editor({
     viewRef.current = view;
     // A freshly loaded page focuses nothing, and the first thing typed at it
     // goes nowhere. The editor is what the page is for, so it takes the focus.
-    // Not after a tap on a phone, for the reason the signal below gives.
-    if (!keyboardUnasked() && nothingFocused()) view.focus();
+    // Not after a tap on a phone, for the reason the signal below gives. Only
+    // the focused pane's, as on the way back into the tab: a restored tab
+    // mounts every pane at once, and the first to mount would take the focus,
+    // which the route follows to that pane and which turns its zoom off.
+    if (focusedRef.current && !keyboardUnasked() && nothingFocused()) view.focus();
+
+    reveal();
+    function onScroll() {
+      // No height is a pane zoomed out of sight since it showed, whose
+      // scroller reads 0 wherever the reader left it.
+      if (!shown || view.scrollDOM.clientHeight === 0) return;
+      top = view.scrollDOM.scrollTop;
+      soon();
+    }
+    view.scrollDOM.addEventListener("scroll", onScroll, { passive: true });
+    // A closed tab or a reload never runs the cleanup below.
+    window.addEventListener("pagehide", keep);
 
     return () => {
+      view.scrollDOM.removeEventListener("scroll", onScroll);
+      window.removeEventListener("pagehide", keep);
+      keep();
       viewRef.current = null;
       view.destroy();
     };

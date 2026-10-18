@@ -95,6 +95,7 @@ import {
   openHtmlInFocused,
   openImageInFocused,
   openInFocused,
+  openOnTop,
   openPdfBeside,
   openPdfInFocused,
   openPersonBeside,
@@ -102,6 +103,7 @@ import {
   openTerminalInFocused,
   openTodosInFocused,
   openVideoBeside,
+  panesOf,
   removeFocused,
   splitFocused,
   stepTab,
@@ -130,6 +132,7 @@ import { useViewport } from "@/lib/use-viewport";
 import { parseVaultEvent } from "@/lib/vault-events";
 import { setWatched } from "@/lib/video";
 import { namesAFile, outgoingLinks, pdfPage, splitTarget, wikiLinkPath } from "@/lib/wikilink";
+import { loadWorkspace, saveWorkspace } from "@/lib/workspace";
 
 /** What an unfocused pane's editor reports its typing to, which is nowhere. */
 const IGNORE = () => {};
@@ -256,25 +259,53 @@ function Home() {
   /**
    * Whether the archive is in what the four lookups answer with.
    *
-   * React state and nothing more, so a reload puts it back to hidden. That is
-   * the same bargain the pane arrangement makes, and the safer default of the
-   * two: a lookup that quietly kept showing finished work would be the mode you
-   * forgot you were in.
+   * React state and nothing more, so a reload puts it back to hidden, where
+   * the pane arrangement comes back: a lookup that quietly kept showing
+   * finished work would be the mode you forgot you were in.
    */
   const [archive, setArchive] = useState(false);
   const { note, line } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
 
-  // How the window is divided, and what is open in each division. Seeded from
-  // the URL once and never read back out of it: the arrangement itself is not
-  // in there, so a reload comes back to the note you were reading in a single
-  // pane rather than to the tabs you had around it.
+  // Read up here rather than beside the drawer below, because which device
+  // this is decides which saved workspace the layout starts from.
+  const { narrow, coarse } = useViewport();
+  // What this device had open when it last drew, read once (#495). Its own
+  // state so the layout and the tree start from the one read: a second read
+  // would re-id every pane again for nothing.
+  const [saved] = useState(() => loadWorkspace(coarse));
+  // The key it came from, which every save goes back to: a pointer that
+  // changes mid-session (a mouse plugged into a tablet) would otherwise write
+  // this layout over the other device's.
+  const [savedAs] = useState(coarse);
+  // How the window is divided, and what is open in each division. Restored
+  // from this device's saved workspace, then the URL's note opened over it:
+  // a link that names a note wins, and a plain reload, whose URL names the
+  // focused pane's note, finds it already there and changes nothing.
   //
-  // ponytail: layout is lost on reload. Serialising a tree of splits into a
-  // query parameter is its own feature, and tmux is the thing to copy if it
-  // ever earns the work: a session that outlives the window.
-  const [layout, setLayout] = useState<Layout>(() => emptyLayout(note, line));
+  // In the initializer and not an effect, so the first render already draws
+  // the restored panes and no editor mounts on a pane about to be replaced.
+  const [layout, setLayout] = useState<Layout>(() => {
+    const start =
+      saved === null
+        ? emptyLayout(note, line)
+        : note === undefined
+          ? saved.layout
+          : openOnTop(saved.layout, note, line);
+    // A note left standing conflicted keeps the vault's text from before the
+    // other write in the cache, which the effect on `held` below drops only
+    // where no pane reads it. A pane this layout starts with reads it from its
+    // first render, so it would open on that text as the vault's and never see
+    // the vault come to hold the kept text: dropped here, before any pane
+    // mounts, for every pane the first render draws.
+    for (const each of start.tabs.flatMap((tab) => panesOf(tab.root))) {
+      if (each.path !== undefined && heldText(each.path)?.conflicted) {
+        queryClient.removeQueries({ queryKey: ["note", each.path], exact: true });
+      }
+    }
+    return start;
+  });
   // Raised by every key that moves the focus, so the editor in the pane arrived
   // at takes it. A click raises nothing, having already moved the focus itself.
   const [focusSignal, setFocusSignal] = useState(0);
@@ -323,11 +354,12 @@ function Home() {
   const layoutNow = useRef(layout);
   layoutNow.current = layout;
   // What an unfocused pane's editor asks before it takes the vault's text.
-  // It refuses only in a pane showing the text held for its note as a
-  // conflict: that pane is where the reader left it, and a reload would put
-  // the vault's text there in its place, so coming back would find nothing
-  // to restore and read "Saved" under a bar saying the note changed on disk.
-  // A pane on that note that never showed the kept text takes the write, or
+  // It refuses only in a pane showing the text held for its note, conflicted
+  // or not: that pane is where the reader left it, or a restore opened it on
+  // that text, and a reload would put the vault's text there in its place, so
+  // coming back would find nothing to restore and read "Saved" over text the
+  // vault never took.
+  // A pane on that note that never showed the held text takes the write, or
   // it would sit on an old text that one keystroke writes back over the new.
   // One callback per pane, kept, so the editor's memo is not broken by a new
   // arrow each render.
@@ -340,7 +372,7 @@ function Home() {
         // Only an entry of the note `text` is: another note's never refuses.
         const entry = path === undefined ? undefined : heldText(path, text);
         const doc = docIn(id);
-        return !(entry?.conflicted && doc !== undefined && sameText(doc, entry.content));
+        return !(entry !== undefined && doc !== undefined && sameText(doc, entry.content));
       };
       standby.current.set(id, call);
     }
@@ -375,16 +407,17 @@ function Home() {
       if (query && query.getObserversCount() === 0) cache.remove(query);
     }
   }, [held, queryClient]);
-  // A pane left showing the kept text refused every reload while the conflict
-  // stood (`standbyReload`). Once it is settled elsewhere, the vault's text
-  // may already be in the cache, so no reload comes, and the pane would keep
-  // text the reader threw away for one keystroke to write over the vault.
-  // Put straight into the view: an unfocused pane reports no typing, and off
-  // the undo stack so `u` there cannot bring the thrown-away text back.
-  const conflictedBefore = useRef(new Set<string>());
+  // A pane left showing held text refused every reload while it was held
+  // (`standbyReload`), conflicted or not: a restore opens every pane on a
+  // held note on that text. Once it is settled or thrown away elsewhere, the
+  // vault's text may already be in the cache, so no reload comes, and the
+  // pane would keep text the reader threw away for one keystroke to write over
+  // the vault. Put straight into the view: an unfocused pane reports no
+  // typing, and off the undo stack so `u` there cannot bring it back.
+  const heldBefore = useRef(new Set<string>());
   useEffect(() => {
-    const now = new Set(held.filter((each) => each.conflicted).map((each) => each.path));
-    for (const path of conflictedBefore.current) {
+    const now = new Set(held.map((each) => each.path));
+    for (const path of heldBefore.current) {
       const vault = queryClient.getQueryData<string>(["note", path]);
       if (now.has(path) || vault === undefined) continue;
       for (const each of tabPanes(layoutNow.current)) {
@@ -398,7 +431,7 @@ function Home() {
         });
       }
     }
-    conflictedBefore.current = now;
+    heldBefore.current = now;
   }, [held, queryClient, pane.id]);
   // The focused pane's note and the hook holding its unsaved text, for the
   // event handler below to read. That handler lives in an effect that opens one
@@ -414,8 +447,7 @@ function Home() {
   // because the key that toggles it is pressed inside the editor.
   //
   // Shut to begin with below `md`, where it is a drawer over the page and not a
-  // panel beside it.
-  const { narrow, coarse } = useViewport();
+  // panel beside it. Wider, it starts the way this device last left it.
   // A phone: the one place the toolbar is drawn, and the rail is not.
   const phone = narrow && coarse;
   // The whole frame makes room for a keyboard that covers the page, so the
@@ -423,7 +455,19 @@ function Home() {
   // decides it and not the width: a tablet has the same keyboard.
   const frame = useRef<HTMLElement>(null);
   useKeyboardInset(frame, coarse);
-  const [treeOpen, setTreeOpen] = useState(!narrow);
+  const [treeOpen, setTreeOpen] = useState(!narrow && (saved?.treeOpen ?? true));
+  // The whole workspace on every change, over whatever another kasten tab on
+  // this device wrote: the last tab to move wins, and none listens for the
+  // others, so two tabs never merge into a layout neither had open.
+  //
+  // The tree as a wide window last had it: a narrow one shuts the drawer
+  // whatever was saved, and writing that down would shut the desktop's panel
+  // too after a reload that only passed through a narrow window.
+  const wideTree = useRef(saved?.treeOpen ?? true);
+  useEffect(() => {
+    if (!narrow) wideTree.current = treeOpen;
+    saveWorkspace(savedAs, layout, wideTree.current);
+  }, [savedAs, layout, treeOpen, narrow]);
   // The drawer covers the pane, so it shuts whenever the focus is handed to
   // one, which every way of opening something ends with. It shuts as well when
   // the window turns narrow under an open panel, a phone turned upright being
@@ -666,12 +710,14 @@ function Home() {
   // you were reading. `replace` rather than a push: moving between panes is not
   // navigation, and one history entry per pane would bury the back button under
   // a walk across the window.
+  //
+  // The note and not its line: the line belongs to the open that set it, and
+  // the cursor has moved on since. Written down, a reload would read it as a
+  // link asking for that line (`openOnTop`) and jump the cursor back over the
+  // spot the editor saved.
   useEffect(() => {
-    navigate({
-      search: pane.path === undefined ? {} : { note: pane.path, line: pane.line },
-      replace: true,
-    });
-  }, [pane.path, pane.line, navigate]);
+    navigate({ search: pane.path === undefined ? {} : { note: pane.path }, replace: true });
+  }, [pane.path, navigate]);
 
   // The vault is the source of truth, so a note written by an agent or an ssh
   // session is as real as one written here. `/api/events` says what moved and
@@ -2464,13 +2510,17 @@ function Home() {
                         // reported alone: the note this reads is the one the
                         // autosave follows, which is the note in that pane.
                         onReload={focused ? reload : undefined}
-                        // The focused pane alone again: the autosave takes held
-                        // text through `allowReload`, which only this pane asks.
+                        // Every pane, not the focused one alone: a restored
+                        // pane out of focus has to open on the held text too,
+                        // or the autosave finds the vault's text on screen
+                        // when the focus arrives and never offers it (#495).
+                        // It takes the text on that arrival, the editor
+                        // showing it; till then `standbyReload` keeps it there.
                         // `held` is read for the re-render, `heldText` for the
                         // content, which the list does not carry. Against the
                         // cached text, the entry the autosave would take.
                         held={
-                          focused && held.some((each) => each.path === shown.path)
+                          held.some((each) => each.path === shown.path)
                             ? heldText(
                                 shown.path,
                                 queryClient.getQueryData<string>(["note", shown.path]),

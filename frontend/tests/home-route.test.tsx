@@ -266,6 +266,13 @@ beforeEach((context) => {
 afterEach(() => {
   localStorage.removeItem("kasten.held");
   localStorage.removeItem("kasten.held.2");
+  // Each test is a device of its own, or the layout one test left would be
+  // the layout the next one starts on.
+  localStorage.removeItem("kasten.workspace.1");
+  localStorage.removeItem("kasten.workspace.coarse.1");
+  // And the cursor each note was left at: a test that opens a note and presses
+  // a key at its first line would otherwise press it where another test left.
+  localStorage.removeItem("kasten.positions.1");
   resetHeld();
   outside.clear();
 });
@@ -317,7 +324,7 @@ function act(callback: () => void | Promise<void>): void | Promise<void> {
  * exercises an effect run twice, so a mount that double-fires would be a second
  * `EventSource` and a second reload to reason about in every test below.
  */
-async function renderApp() {
+async function renderApp(entry = "/") {
   const queryClient = new QueryClient({
     // The app's own settings, because what is being tested is what the app
     // does: a note counted fresh for ten seconds is what makes the event
@@ -327,7 +334,7 @@ async function renderApp() {
   const router = createRouter({
     routeTree,
     context: { queryClient },
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    history: createMemoryHistory({ initialEntries: [entry] }),
   });
 
   // Loaded before it is rendered, because a `RouterProvider` handed a router
@@ -446,9 +453,11 @@ async function renderApp() {
     /** The line diff the save detail opens on while the note stands conflicted. */
     diff: () => container.querySelector("[data-testid='conflict-diff']")?.textContent ?? null,
     /** Leave for another route or come back, the way a link does. */
-    navigate: (to: "/" | "/capture") =>
+    navigate: (to: "/" | "/capture", note?: string) =>
       act(async () => {
-        await router.navigate({ to });
+        await (to === "/" && note !== undefined
+          ? router.navigate({ to, search: { note } })
+          : router.navigate({ to }));
       }),
     /** Whether the bar's reading is wearing the flash a refusal raises. */
     flashing: () =>
@@ -1093,10 +1102,13 @@ describe("the route", () => {
     await app.navigate("/");
     await settle();
 
-    expect(app.held()?.label).toBe("Not saved: index");
-    app.click("index.md");
-    await settle();
+    // The return restores the pane the note was left in, which opens on the
+    // held text: the buffer holds it, so the bar reads the note rather than
+    // listing it among the others.
     expect(app.text()).toBe("he index note");
+    expect(heldText("index.md")?.content).toBe("he index note");
+    expect(app.status()).toBe("Could not save");
+    expect(app.held()).toBeNull();
   });
 
   it("writes nothing when the editor route is left while the note stands conflicted", async () => {
@@ -1110,9 +1122,12 @@ describe("the route", () => {
     await app.navigate("/");
     await settle();
 
-    expect(app.heldConflict()).toBe("Changed on disk: index");
-    expect(app.held()).toBeNull();
+    // The return restores the pane the note was left in, which opens on the
+    // kept text and stands conflicted again, writing nothing until asked.
+    expect(app.text()).toBe("he index note");
+    expect(app.status()).toBe("Changed on disk");
     expect(heldText("index.md")).toMatchObject({ content: "he index note", conflicted: true });
+    expect(saveNote).not.toHaveBeenCalled();
   });
 
   it("keeps a flush that fails after the note was reopened on screen, and saves it from there", async () => {
@@ -1511,12 +1526,15 @@ describe("the route", () => {
     await settle();
     await app.navigate("/capture");
     await settle();
-    await app.navigate("/");
-    await settle();
-
+    // The vault answers with `vault` before the return, as the disk does: the
+    // return reopens the note in its restored pane and reads it there, before
+    // the click below, which then lands on the note already open.
     fetchNote.mockImplementation(async (path: string) =>
       path === "index.md" ? vault : VAULT[path],
     );
+    await app.navigate("/");
+    await settle();
+
     app.click("index.md");
     await settle();
     return app;
@@ -1545,6 +1563,9 @@ describe("the route", () => {
     await settle();
     await app.navigate("/capture");
     await settle();
+    // A fresh start, so the note is held and on screen nowhere: restored, its
+    // pane would stand conflicted and refuse the rename below.
+    localStorage.removeItem("kasten.workspace.1");
     await app.navigate("/");
     await settle();
     expect(heldText("index.md")).toMatchObject({ content: "he index note", conflicted: true });
@@ -2259,12 +2280,15 @@ describe("the route", () => {
       await settle();
       await app.navigate("/capture");
       await settle();
-      await app.navigate("/");
-      await settle();
-
+      // The vault answers with the other write before the return, as the disk
+      // does: the return reopens the note in its restored pane and reads it
+      // there, before any tap.
       fetchNote.mockImplementation(async (path: string) =>
         path === "index.md" ? "somebody else's note" : VAULT[path],
       );
+      await app.navigate("/");
+      await settle();
+
       fireEvent.click(screen.getByRole("button", { name: "File tree" }));
       app.click("index.md");
       await settle();
@@ -5618,5 +5642,503 @@ describe("a pdf as a row of the tree", () => {
     // A tap on a row shuts the drawer; opened again it marks the pdf.
     fireEvent.click(screen.getByRole("button", { name: "File tree" }));
     expect(row(PLAN)).toHaveAttribute("aria-current", "page");
+  });
+});
+
+describe("the workspace across a reload", () => {
+  const FINE = "kasten.workspace.1";
+  const COARSE_KEY = "kasten.workspace.coarse.1";
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("EventSource", FakeEventSource);
+    vi.stubGlobal("scrollTo", () => {});
+    FakeEventSource.last = undefined;
+    fetchFiles.mockResolvedValue(Object.keys(VAULT));
+    // A note the vault does not hold is refused, the way the backend's 404 is.
+    fetchNote.mockImplementation(async (path: string) => {
+      const text = VAULT[path];
+      if (text === undefined) throw new Error(`GET /api/files/${path} failed with 404`);
+      return text;
+    });
+    saveNote.mockImplementation(async (path: string, content: string) => ({ path, content }));
+    fetchTodos.mockResolvedValue([]);
+    fetchImages.mockResolvedValue([]);
+    fetchHtml.mockResolvedValue([]);
+    fetchAssets.mockResolvedValue([]);
+  });
+
+  afterEach(async () => {
+    cleanup();
+    await hashed();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.resetAllMocks();
+  });
+
+  /** A reload: the page goes, storage stays, and the URL is the one given. */
+  async function reload(entry = "/") {
+    cleanup();
+    const app = await renderApp(entry);
+    await settle();
+    return app;
+  }
+
+  /** What one device holds under its key, ids taken out and the focus by position. */
+  function saved(key = FINE): unknown {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return null;
+    type Node = { id: string; dir?: string; children?: Node[] };
+    const leaves = (node: Node): Node[] => node.children?.flatMap(leaves) ?? [node];
+    const strip = (node: Node): unknown =>
+      node.children ? { dir: node.dir, children: node.children.map(strip) } : { ...node, id: 0 };
+    const { layout, treeOpen } = JSON.parse(raw);
+    return {
+      treeOpen,
+      active: layout.active,
+      tabs: layout.tabs.map((tab: { root: Node; focus: string; zoom?: boolean }) => ({
+        zoom: tab.zoom,
+        focus: leaves(tab.root).findIndex((leaf) => leaf.id === tab.focus),
+        root: strip(tab.root),
+      })),
+    };
+  }
+
+  /** Put a layout under the fine pointer's key, as a page before this one did. */
+  function seed(tabs: unknown[], active = 0) {
+    localStorage.setItem(FINE, JSON.stringify({ layout: { tabs, active }, treeOpen: true }));
+  }
+
+  const selectedTab = () => screen.getByRole("tab", { selected: true }).textContent;
+
+  it("workspace: A1 A2 A4 A7 the splits, tabs, focus and zoom made by keys come back", async () => {
+    const app = await renderApp();
+    await settle();
+    app.click("index.md");
+    await settle();
+    app.leader("%");
+    await settle();
+    app.click("other.md");
+    await settle();
+    app.leader("z");
+    await settle();
+    app.leader("c", "t");
+    await settle();
+    app.click("index.md");
+    await settle();
+    const before = saved();
+    expect(before).toMatchObject({
+      active: 1,
+      tabs: [{ zoom: true, focus: 1, root: { dir: "row" } }, { focus: 0 }],
+    });
+
+    const again = await reload();
+
+    expect(again.tabs()).toBe(2);
+    expect(selectedTab()).toContain("index");
+    expect(again.text()).toBe("the index note");
+    // The restored layout, written back by the page that restored it.
+    expect(saved()).toEqual(before);
+    again.leader("1");
+    await settle();
+    expect(again.panes()).toBe(2);
+    expect(again.focusedPane()).toBe(1);
+  });
+
+  it("workspace: A7 I4 a phone's note opened by a tap comes back, under its own key", async () => {
+    stubMatchMedia({ [NARROW]: true, [COARSE]: true });
+    const app = await renderApp();
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "File tree" }));
+    app.click("index.md");
+    await settle();
+
+    const again = await reload();
+
+    expect(again.text()).toBe("the index note");
+    expect(localStorage.getItem(COARSE_KEY)).not.toBeNull();
+    expect(localStorage.getItem(FINE)).toBeNull();
+    // Shut, the way a phone always starts.
+    expect(again.tree()).toBeNull();
+  });
+
+  it("workspace: A3 a todo pane beside a note comes back holding the todos", async () => {
+    seed([
+      {
+        id: "t",
+        root: {
+          id: "s",
+          dir: "row",
+          children: [
+            { id: "a", path: "index.md" },
+            { id: "b", todos: true },
+          ],
+        },
+        focus: "a",
+      },
+    ]);
+
+    const app = await reload();
+
+    expect(app.panes()).toBe(2);
+    expect(app.text()).toBe("the index note");
+    expect(app.todoPane()).not.toBeNull();
+  });
+
+  it("workspace: A5 the tree shut on a desktop stays shut, and a narrow window starts it shut", async () => {
+    const app = await renderApp();
+    await settle();
+    expect(app.tree()).not.toBeNull();
+    app.click("index.md");
+    await settle();
+    app.leader("b");
+    await settle();
+    expect(app.tree()).toBeNull();
+
+    const again = await reload();
+    expect(again.tree()).toBeNull();
+    again.leader("b");
+    await settle();
+    expect(again.tree()).not.toBeNull();
+    expect(saved()).toMatchObject({ treeOpen: true });
+
+    stubMatchMedia({ [NARROW]: true });
+    const narrow = await reload();
+    expect(narrow.tree()).toBeNull();
+  });
+
+  it("workspace: A5 a narrow window in between leaves the desktop's open tree open", async () => {
+    const app = await renderApp();
+    await settle();
+    expect(app.tree()).not.toBeNull();
+
+    stubMatchMedia({ [NARROW]: true });
+    const narrow = await reload();
+    expect(narrow.tree()).toBeNull();
+    expect(saved()).toMatchObject({ treeOpen: true });
+
+    stubMatchMedia();
+    const wide = await reload();
+    expect(wide.tree()).not.toBeNull();
+  });
+
+  it("workspace: I1 a broken saved workspace starts clean and is removed", async () => {
+    localStorage.setItem(FINE, "{not json");
+
+    const app = await reload();
+
+    expect(app.tree()).not.toBeNull();
+    expect(app.panes()).toBe(1);
+    expect(localStorage.getItem(FINE)).not.toBe("{not json");
+    expect(saved()).toMatchObject({ tabs: [{ root: { id: 0 } }] });
+  });
+
+  it("workspace: I2 a pane naming a note gone since blocks nothing and is never written", async () => {
+    seed([
+      {
+        id: "t",
+        root: {
+          id: "s",
+          dir: "row",
+          children: [
+            { id: "a", path: "index.md" },
+            { id: "b", path: "gone.md" },
+          ],
+        },
+        focus: "a",
+      },
+    ]);
+
+    const app = await reload();
+    expect(screen.getByText("Could not open gone.md")).toBeInTheDocument();
+    expect(app.text()).toBe("the index note");
+    app.press("x");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(saveNote.mock.calls.map(([path]) => path)).toContain("index.md");
+    expect(saveNote.mock.calls.filter(([path]) => path === "gone.md")).toEqual([]);
+  });
+
+  it("workspace: I2 a focused pane naming a note gone since writes nothing, staying or leaving", async () => {
+    seed([{ id: "t", root: { id: "a", path: "gone.md" }, focus: "a" }]);
+
+    await reload();
+    expect(screen.getByText("Could not open gone.md")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    cleanup();
+    await hashed();
+
+    expect(saveNote).not.toHaveBeenCalled();
+    expect(fetchFiles).toHaveBeenCalled();
+  });
+
+  it("workspace: I3 a URL naming a note another tab holds goes to that tab", async () => {
+    seed([
+      { id: "t1", root: { id: "a", path: "index.md" }, focus: "a" },
+      { id: "t2", root: { id: "b", path: "other.md" }, focus: "b" },
+    ]);
+
+    const app = await reload("/?note=other.md");
+
+    expect(app.tabs()).toBe(2);
+    expect(selectedTab()).toContain("other");
+    expect(app.text()).toBe("the other note");
+  });
+
+  it("workspace: I3 a URL naming a note no pane holds opens it in the focused pane", async () => {
+    seed([
+      {
+        id: "t",
+        root: {
+          id: "s",
+          dir: "row",
+          children: [
+            { id: "a", path: "index.md" },
+            { id: "b", todos: true },
+          ],
+        },
+        focus: "b",
+      },
+    ]);
+
+    const app = await reload("/?note=other.md");
+
+    expect(app.panes()).toBe(2);
+    expect(app.todoPane()).toBeNull();
+    expect(app.focusedPane()).toBe(1);
+  });
+
+  it("workspace: I3 a plain reload, its URL naming the focused note, changes nothing", async () => {
+    seed(
+      [
+        { id: "t1", root: { id: "a", path: "index.md" }, focus: "a" },
+        {
+          id: "t2",
+          root: { id: "s", dir: "col", children: [{ id: "b", path: "other.md" }, { id: "c" }] },
+          focus: "b",
+        },
+      ],
+      1,
+    );
+    const before = saved();
+
+    await reload("/?note=other.md");
+
+    expect(saved()).toEqual(before);
+    expect(selectedTab()).toContain("other");
+  });
+
+  it("workspace: I5 a restore leaves the held text of a pane out of focus where it was", async () => {
+    holdText("other.md", {
+      content: "typed and never saved",
+      reason: "PUT failed with 500",
+      conflicted: false,
+    });
+    const held = localStorage.getItem("kasten.held.2");
+    seed([
+      {
+        id: "t",
+        root: {
+          id: "s",
+          dir: "row",
+          children: [
+            { id: "a", path: "index.md" },
+            { id: "b", path: "other.md" },
+          ],
+        },
+        focus: "a",
+      },
+    ]);
+
+    const app = await reload();
+
+    expect(app.panes()).toBe(2);
+    expect(app.held()?.title).toContain("other.md");
+    expect(localStorage.getItem("kasten.held.2")).toBe(held);
+    expect(localStorage.getItem(FINE)).not.toContain("typed and never saved");
+  });
+
+  it("workspace: I4 a pointer that changes mid-session saves under the key the layout came from", async () => {
+    const media = stubMatchMedia();
+    const app = await renderApp();
+    await settle();
+    app.click("index.md");
+    await settle();
+
+    await media.set(COARSE, true);
+    app.click("other.md");
+    await settle();
+
+    expect(localStorage.getItem(COARSE_KEY)).toBeNull();
+    expect(localStorage.getItem(FINE)).toContain("other.md");
+  });
+
+  it("workspace: I2 a return naming a conflicted note no saved pane holds reads the vault afresh", async () => {
+    const app = await renderApp();
+    await settle();
+    app.click("index.md");
+    await settle();
+    await app.navigate("/capture");
+    await settle();
+    // Left conflicted, and the vault came to hold the kept text since. The
+    // cache still holds the text from before, which a reopen must not take
+    // for the vault's.
+    holdText("index.md", {
+      content: "the kept text",
+      reason: "Changed on disk before the note was left",
+      conflicted: true,
+    });
+    fetchNote.mockImplementation(async (path: string) =>
+      path === "index.md" ? "the kept text" : VAULT[path],
+    );
+    // Nothing saved, so the layout is the URL's note alone.
+    localStorage.removeItem(FINE);
+
+    await app.navigate("/", "index.md");
+    await settle();
+
+    expect(app.text()).toBe("the kept text");
+    expect(app.status()).toBe("Saved");
+    expect(heldText("index.md")).toBeUndefined();
+  });
+
+  it("workspace: I5 text thrown away in one pane does not come back from a second pane on the same note", async () => {
+    holdText("index.md", {
+      content: "typed and never saved",
+      reason: "Not yet written when the page was hidden",
+      conflicted: false,
+    });
+    seed([
+      {
+        id: "t",
+        root: {
+          id: "s",
+          dir: "row",
+          children: [
+            { id: "a", path: "index.md" },
+            { id: "b", path: "index.md" },
+          ],
+        },
+        focus: "a",
+      },
+    ]);
+    const app = await reload();
+    expect(document.querySelectorAll(".cm-content")[1]?.textContent).toBe("typed and never saved");
+
+    app.ex("e!");
+    await settle();
+
+    expect(document.querySelectorAll(".cm-content")[1]?.textContent).toBe("the index note");
+    act(() => app.focusPane(1));
+    await settle();
+    app.press("x");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(saveNote.mock.calls.map(([, content]) => content)).not.toContain("yped and never saved");
+  });
+
+  it("workspace: I3 a URL with a line on the focused note jumps to that line", async () => {
+    fetchNote.mockImplementation(async (path: string) =>
+      path === "index.md" ? "one\ntwo\nthree\nfour\n" : VAULT[path],
+    );
+    seed([{ id: "t", root: { id: "a", path: "index.md" }, focus: "a" }]);
+    // Left on line 2, which a URL naming a line must not lose to.
+    localStorage.setItem(
+      "kasten.positions.1",
+      JSON.stringify([["index.md", { anchor: 4, head: 4, top: 0 }]]),
+    );
+
+    await reload("/?note=index.md&line=4");
+
+    const view = EditorView.findFromDOM(document.querySelector(".cm-editor") as HTMLElement);
+    const head = view?.state.selection.main.head ?? -1;
+    expect(view?.state.doc.lineAt(head).number).toBe(4);
+  });
+
+  /** index.md focused beside other.md, which holds text a failed write left. */
+  async function heldBeside() {
+    holdText("other.md", {
+      content: "typed and never saved",
+      reason: "PUT failed with 500",
+      conflicted: false,
+    });
+    seed([
+      {
+        id: "t",
+        root: {
+          id: "s",
+          dir: "row",
+          children: [
+            { id: "a", path: "index.md" },
+            { id: "b", path: "other.md" },
+          ],
+        },
+        focus: "a",
+      },
+    ]);
+    return reload();
+  }
+
+  /** The text of the editor in one pane, by position. */
+  const paneText = (index: number) =>
+    document.querySelectorAll(".cm-content")[index]?.textContent ?? null;
+
+  it("workspace: I5 held text of a restored pane out of focus comes back when the pane gets the focus by key", async () => {
+    const app = await heldBeside();
+
+    app.leader("o");
+    await settle();
+
+    expect(app.focusedPane()).toBe(1);
+    expect(paneText(1)).toBe("typed and never saved");
+    expect(app.status()).toBe("Could not save");
+  });
+
+  it("workspace: I5 held text of a restored pane out of focus comes back when the pane gets the focus by tap", async () => {
+    const app = await heldBeside();
+
+    act(() => app.focusPane(1));
+    await settle();
+
+    expect(app.focusedPane()).toBe(1);
+    expect(paneText(1)).toBe("typed and never saved");
+    expect(app.status()).toBe("Could not save");
+  });
+
+  it("workspace: I7 storage refusing every touch still starts the app, nothing saved", async () => {
+    const refused = () => {
+      throw new DOMException("blocked", "SecurityError");
+    };
+    const tried: string[] = [];
+    const get = Storage.prototype.getItem;
+    const set = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key) {
+      if (key.startsWith("kasten.workspace")) refused();
+      return get.call(this, key);
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key.startsWith("kasten.workspace")) {
+        tried.push(key);
+        refused();
+      }
+      set.call(this, key, value);
+    });
+
+    const app = await reload();
+    app.click("index.md");
+    await settle();
+
+    expect(app.text()).toBe("the index note");
+    expect(tried).toContain(FINE);
   });
 });
