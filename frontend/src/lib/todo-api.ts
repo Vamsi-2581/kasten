@@ -10,6 +10,8 @@ import {
   createNote,
   fetchNote,
   fetchTodos,
+  NoteExists,
+  NoteMissing,
   type SearchHit,
   saveNote,
   searchNotes,
@@ -143,8 +145,16 @@ export async function blockTodoInVault(hit: SearchHit, blocker: SearchHit): Prom
   const lines = same ? blockerLines : text.split("\n");
   if (lines[hit.line - 1] !== hit.text) return;
 
+  // A blocker whose id another todo line carries too is refused before any
+  // write: the `⛔` could not say which of the two it waits on.
+  const todos = await fetchTodos();
+  if (named.id !== undefined) {
+    const other = otherTodoWithId(named.id, blocker.path, blocker.line, todos, blockerText);
+    if (other !== null) throw new Error(other);
+  }
+
   const id = named.id ?? newId();
-  const seen = closedAmong((await fetchTodos()).flatMap((found) => parseTodo(found.text) ?? []));
+  const seen = closedAmong(todos.flatMap((found) => parseTodo(found.text) ?? []));
   // The blocker answers off its own line: the id may be minutes old or new.
   const closed: Closed = (asked) => (asked === id ? !isOpen(named) : seen(asked));
   const held = blockLine(hit.text, id, closed);
@@ -227,8 +237,49 @@ async function writeBackBlocked(
  * A write to the note the key was typed into is dropped: the buffer owns that
  * note, and a `PUT` over it would land on text somebody is still typing. The
  * dependents in there travelled with the press for the same reason.
+ *
+ * The log goes through `updateNote`, which reads each note again on a refusal
+ * and works the line out afresh. Two quick presses read today's note at once,
+ * and a write naming that read as its base would refuse the second (#538).
+ *
+ * Presses run one after the other, in the order they were made. A reopen whose
+ * read came before the first press's save would find no line to drop, and the
+ * line would land after it and stay; and `## Done` keeps the order of the keys,
+ * whichever answers come back first. A failed press does not hold up the next.
  */
-export async function cycleTodoAside(
+export function cycleTodoAside(
+  path: string,
+  cycle: TodoCycle,
+  today: string,
+  paths: string[],
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ASIDE_WAIT_MS);
+  });
+  const turn = Promise.race([asideTurns, bound])
+    .finally(() => clearTimeout(timer))
+    .then(() => cycleAside(path, cycle, today, paths));
+  // Settled either way, so the next press waits on this one and never on why
+  // it failed.
+  asideTurns = Promise.allSettled([turn]);
+  return turn;
+}
+
+/** The press before this one, which the next waits on. */
+let asideTurns: Promise<unknown> = Promise.resolve();
+
+/**
+ * How long a press waits on the one before it, then goes on its own.
+ *
+ * The api client sets no timeout, so a press whose answer never comes would
+ * otherwise hold every later press until the page reloads. Ten seconds is far
+ * past any answer the vault gives on a working line; past it the order is lost
+ * for that pair, which is what a press did before it waited at all.
+ */
+const ASIDE_WAIT_MS = 10_000;
+
+async function cycleAside(
   path: string,
   cycle: TodoCycle,
   today: string,
@@ -257,22 +308,47 @@ export async function cycleTodoAside(
       }
     }
 
-    const daily = await dailyNote(paths, logged);
-    const writes = doneLogWrites({
-      was,
-      now,
-      path,
-      dailyPath: daily.path,
-      dailyText: daily.text,
-      logged,
-      today,
-    });
+    const daily = periodicNote("daily", new Date());
+    // One note's write, worked out with `text` standing for that note. Today's
+    // note goes into `logged` too, so a retry reading the line an earlier press
+    // wrote there neither logs it twice nor misses it on a reopen. Visiting
+    // another note, `daily.body` only fills a write that `find` throws away.
+    const change = (notePath: string) => (text: string) =>
+      doneLogWrites({
+        was,
+        now,
+        path,
+        dailyPath: daily.path,
+        dailyText: notePath === daily.path ? text : daily.body,
+        logged: { ...logged, [notePath]: text },
+        today,
+      }).find((write) => write.path === notePath)?.text ?? null;
 
-    await send(
-      writes.filter((write) => write.path !== path),
-      paths,
-      { ...logged, [daily.path]: daily.text },
-    );
+    const visits = new Set([daily.path, ...Object.keys(logged)]);
+    visits.delete(path);
+    for (const notePath of visits) {
+      // `paths` can be a listing behind a press that just made today's note,
+      // so a note it leaves out may still be on disk.
+      const unlisted = notePath === daily.path && !paths.includes(notePath);
+      if (unlisted) {
+        const text = change(notePath)(daily.body);
+        if (text !== null) {
+          try {
+            await createNote(notePath, text);
+            continue;
+          } catch (error) {
+            // A press just before this one made today's note: write into it.
+            if (!(error instanceof NoteExists)) throw error;
+          }
+        }
+      }
+      try {
+        await updateNote(notePath, change(notePath));
+      } catch (error) {
+        // A reopen on a day with no note yet has no line to drop.
+        if (!(unlisted && error instanceof NoteMissing)) throw error;
+      }
+    }
   }
 
   // Only a press that closed or reopened a todo something can name moves what

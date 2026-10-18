@@ -291,17 +291,44 @@ export async function fetchGraph({
   return data;
 }
 
+/**
+ * A read refused because no note is at that path.
+ *
+ * A class of its own, because the `## Done` log reads it as a day with no note
+ * yet, which holds no line to drop. The message is the one every other failed
+ * read says, so a notice reads the same.
+ */
+export class NoteMissing extends Error {
+  constructor(path: string) {
+    super(`GET /api/files/${path} failed with 404`);
+  }
+}
+
 /** The text of one note, read straight off the vault. */
 export async function fetchNote(path: string): Promise<string> {
   const { data, response } = await client.GET("/api/files/{path}", {
     params: { path: { path } },
   });
 
+  if (response.status === 404) throw new NoteMissing(path);
   if (!data) {
     throw new Error(`GET /api/files/${path} failed with ${response.status}`);
   }
 
   return data.content;
+}
+
+/**
+ * A create refused because a note is already at that path.
+ *
+ * A class of its own, because the `## Done` log reads it as a press just before
+ * having made today's note, and writes into that note instead. The message is
+ * the one every other failed create says, so a notice reads the same.
+ */
+export class NoteExists extends Error {
+  constructor(path: string) {
+    super(`POST /api/files/${path} failed with 409`);
+  }
 }
 
 /**
@@ -319,6 +346,7 @@ export async function createNote(path: string, content = ""): Promise<Note> {
     body: { content },
   });
 
+  if (response.status === 409) throw new NoteExists(path);
   if (!data) {
     throw new Error(`POST /api/files/${path} failed with ${response.status}`);
   }
