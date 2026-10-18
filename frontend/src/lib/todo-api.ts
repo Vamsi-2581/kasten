@@ -19,6 +19,7 @@ import { noteBase } from "@/lib/note-base";
 import { periodicNote } from "@/lib/periodic";
 import { isOpen, newId, parseTodo, patchLine, type TodoState } from "@/lib/todo";
 import type { TodoCycle } from "@/lib/todo-commands";
+import { lineOf } from "@/lib/todo-refile";
 import { expandShorthand } from "@/lib/todo-shorthand";
 import { parseSession } from "@/lib/todo-time";
 import {
@@ -269,6 +270,18 @@ export async function cycleTodoAside(
   }
 }
 
+/**
+ * Whether the row's line still holds the row's todo: the same words and depth,
+ * and the same id where both carry one. A press stamps the id the first time.
+ */
+function sameTodo(text: string, hit: SearchHit): boolean {
+  const was = parseTodo(hit.text);
+  const now = parseTodo(text.split("\n")[hit.line - 1] ?? "");
+  if (was === null || now === null) return false;
+  if (was.id !== undefined && now.id !== undefined && was.id !== now.id) return false;
+  return was.text === now.text && was.indent === now.indent;
+}
+
 /** Read what the press needs, work out the writes, and send them. */
 export async function cycleTodoInVault(
   hit: SearchHit,
@@ -279,10 +292,17 @@ export async function cycleTodoInVault(
   // The vault, not the row: the list is as old as the last fetch, and the note
   // is what the press is about to overwrite.
   const text = await fetchNote(hit.path);
-  const line = text.split("\n")[hit.line - 1] ?? "";
+  // The row's own line, by its words where a write since has shifted it: a
+  // card held through a drag, or a key pressed just after an agent wrote above
+  // it, would otherwise set whatever todo sits at that number now.
+  // Short of that, the row's line where it is still this todo with only its
+  // state and stamps moved on: a second press before the list redraws, whose
+  // first press rewrote the line the row still holds the old words of.
+  const at = lineOf(text, hit.line, hit.text) ?? (sameTodo(text, hit) ? hit.line : null);
+  if (at === null) throw new Error("that line has changed since it was listed");
+  const line = text.split("\n")[at - 1] ?? "";
   const todo = parseTodo(line);
-  // The line moved, or somebody edited it into prose. Cycling whatever is there
-  // now is not what was asked for.
+  // Only a row whose own words are no todo, which the listing never hands over.
   if (todo === null) return;
 
   // The id goes only into the write, so stamping it before the search changes
@@ -317,7 +337,7 @@ export async function cycleTodoInVault(
   const writes = cycleTodoWrites({
     path: hit.path,
     text,
-    line: hit.line,
+    line: at,
     dailyPath: daily.path,
     dailyText: daily.text,
     logged,

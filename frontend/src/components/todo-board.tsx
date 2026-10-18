@@ -13,6 +13,7 @@ import {
   projectChoices,
   withProjectLink,
 } from "@/lib/todo-board";
+import { dropOf, pinnedBy, type Spot } from "@/lib/todo-drag";
 import { type Placed, waitsFor } from "@/lib/todo-view";
 
 /** One todo the board draws, as the pane read it: the tree's todo, not the line's. */
@@ -48,6 +49,30 @@ function cardKey(hit: SearchHit): string {
   return `${hit.path}:${hit.line}`;
 }
 
+/** How far, in pixels, a pressed pointer may wander and still be a click or a tap. */
+const SLOP = 5;
+
+/** How long a finger holds still on a card before it picks the card up. */
+const LONG_PRESS_MS = 400;
+
+/** A press on a card, which becomes a drag once the card is lifted. */
+interface Press {
+  card: Card;
+  from: Spot;
+  /** The pointer that pressed, so a second finger neither drops nor steers the card. */
+  pointerId: number;
+  x: number;
+  y: number;
+  touch: boolean;
+  /** Past the slop for a mouse, past the long press for a finger. */
+  lifted: boolean;
+  /** The cell under the pointer, null over anything else. */
+  over: Spot | null;
+  timer?: ReturnType<typeof setTimeout>;
+  /** Takes the window's listeners off again. */
+  off: () => void;
+}
+
 interface Lane {
   /** The project's whole path or the kind, since two roots can hold a folder of one name. */
   id: string;
@@ -75,8 +100,10 @@ interface TodoBoardProps {
   onOpen: (path: string, line: number) => void;
   onCycle: (hit: SearchHit, state?: TodoState) => void;
   onEdit: (hit: SearchHit, line: string) => void;
-  /** The pane's `m`, said of a card. */
-  onRefile: (hit: TodoHit) => void;
+  /** The pane's `m`, said of a card, or a card dropped on the lane of `project`. */
+  onRefile: (hit: TodoHit, project?: string) => void;
+  /** Why a dropped card moved nothing. */
+  onNotice: (text: string) => void;
 }
 
 /**
@@ -101,6 +128,7 @@ export function TodoBoard({
   onCycle,
   onEdit,
   onRefile,
+  onNotice,
 }: TodoBoardProps) {
   /** `g`: lanes by project rather than by kind. */
   const [byProject, setByProject] = useState(false);
@@ -113,6 +141,25 @@ export function TodoBoard({
   /** The card whose `⋯` is open, by key and text for the reason the list's is. */
   const [more, setMore] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
+  /**
+   * The press under way. A ref, since the window's listeners read it between
+   * renders; `lifted` and `overZone` draw the same thing.
+   */
+  const press = useRef<Press | null>(null);
+  const [lifted, setLifted] = useState<string | null>(null);
+  /** The drop zone under the pointer, by a name each zone draws itself against. */
+  const [overZone, setOverZone] = useState<string | null>(null);
+  /** A drag let go over the card it lifted still clicks it, which opens nothing. */
+  const swallow = useRef(false);
+
+  // A board taken away mid drag leaves no listener on the window.
+  useEffect(
+    () => () => {
+      clearTimeout(press.current?.timer);
+      press.current?.off();
+    },
+    [],
+  );
 
   const choices = useMemo(() => projectChoices(files), [files]);
 
@@ -207,6 +254,8 @@ export function TodoBoard({
 
   /** `g`, and `lanes` by finger. */
   function switchLanes() {
+    // The cell the card left is gone, and with it what a drop would mean.
+    endDrag();
     setByProject(!byProject);
     setRow(0);
     settle();
@@ -229,10 +278,136 @@ export function TodoBoard({
     setPicker({ hit, at: 0 });
   }
 
+  /** Escape, a cancelled pointer, a finger that scrolled, or the end of a drop. */
+  function endDrag() {
+    const held = press.current;
+    if (held === null) return;
+    clearTimeout(held.timer);
+    held.off();
+    press.current = null;
+    setLifted(null);
+    setOverZone(null);
+  }
+
+  /**
+   * The pointer came over a drop zone; `lane` left out is the lane the card
+   * left. Another finger passing over one moves nothing.
+   */
+  function hover(event: React.PointerEvent, zone: string, column: Column, lane?: string) {
+    const held = press.current;
+    if (!held?.lifted || event.pointerId !== held.pointerId) return;
+    held.over = { lane: lane ?? held.from.lane, column };
+    setOverZone(zone);
+  }
+
+  function unhover(event: React.PointerEvent) {
+    const held = press.current;
+    if (!held?.lifted || event.pointerId !== held.pointerId) return;
+    held.over = null;
+    setOverZone(null);
+  }
+
+  // The keys' own writes, so a state drop still runs what `X` runs and a lane
+  // drop goes through `m`'s refile. Nothing here says where in a column the
+  // card goes: the board draws the vault's order and keeps none of its own.
+  function land({ card, from }: Press, to: Spot) {
+    const above = ancestors.get(cardKey(card.hit)) ?? [];
+    const tags = [card.todo, ...above.map((one) => one.todo)].flatMap((todo) => todo.tags);
+    const drop = dropOf(from, to, byProject, pinnedBy(tags));
+    if (drop.kind === "state") onCycle(card.hit, drop.state);
+    else if (drop.kind === "refile") onRefile(card.hit, drop.project);
+    else if (drop.kind === "refused") onNotice(drop.why);
+  }
+  // The window's listeners outlive the render that added them, so they land
+  // through this, which holds the lanes and the props of the latest one.
+  const landing = useRef(land);
+  landing.current = land;
+
+  // Pointer events rather than HTML drag and drop, which a phone does not
+  // fire for a finger. A mouse lifts the card once it moves past the slop, so
+  // a click still opens it. A finger lifts it after a long press, and one that
+  // moves first is a scroll the browser goes on with.
+  function grab(event: React.PointerEvent<HTMLElement>, card: Card, from: Spot) {
+    swallow.current = false;
+    if (event.button !== 0 || press.current !== null) return;
+    const target = event.currentTarget;
+    const { pointerId } = event;
+    const touch = event.pointerType === "touch";
+    const stop = (other: Event) => other.preventDefault();
+    // A second finger's events are not this press's.
+    const mine = (other: PointerEvent) => other.pointerId === pointerId;
+    const cancel = (other: PointerEvent) => {
+      if (mine(other)) endDrag();
+    };
+    // Before the lift a move is a scroll the browser goes on with; after it,
+    // the finger carries the card and the page stays still.
+    const carry = (other: Event) => {
+      if (held.lifted) other.preventDefault();
+    };
+
+    const lift = () => {
+      held.lifted = true;
+      swallow.current = true;
+      setLifted(cardKey(card.hit));
+      if (!touch) return;
+      // A finger's pointer is held by the card it went down on, so no other
+      // cell would hear it pass. Asked first, since letting go of a pointer
+      // nothing holds throws; jsdom has no pointer capture at all.
+      if ("hasPointerCapture" in target && target.hasPointerCapture(pointerId)) {
+        target.releasePointerCapture(pointerId);
+      }
+      // From here the finger carries the card, which no menu interrupts.
+      window.addEventListener("contextmenu", stop);
+    };
+    const move = (other: PointerEvent) => {
+      if (!mine(other) || held.lifted) return;
+      if (Math.hypot(other.clientX - held.x, other.clientY - held.y) <= SLOP) return;
+      if (touch) endDrag();
+      else lift();
+    };
+    const up = (other: PointerEvent) => {
+      if (!mine(other)) return;
+      const { lifted: carried, over } = held;
+      endDrag();
+      if (carried && over !== null) landing.current(held, over);
+    };
+
+    const held: Press = {
+      card,
+      from,
+      pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      touch,
+      lifted: false,
+      over: null,
+      timer: touch ? setTimeout(lift, LONG_PRESS_MS) : undefined,
+      off: () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", cancel);
+        window.removeEventListener("touchmove", carry);
+        window.removeEventListener("contextmenu", stop);
+      },
+    };
+    press.current = held;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    // Added at the press, not at the lift: Android Chrome may already treat a
+    // touch's moves as uncancelable 400 ms in, once one went by unasked.
+    if (touch) window.addEventListener("touchmove", carry, { passive: false });
+  }
+
   // The pane's keys never reach CodeMirror: they land on the section, whose
   // handler calls this. So vim mode on or off changes nothing here.
   useImperativeHandle(ref, () => ({
     onKey(key: string): boolean {
+      // Only while a card is up, so Escape otherwise goes on to the pane.
+      if (key === "Escape" && press.current?.lifted) {
+        endDrag();
+        return true;
+      }
       if (picker !== null) {
         const choice = choices[picker.at];
         if (key === "j") setPicker({ ...picker, at: Math.min(picker.at + 1, choices.length - 1) });
@@ -290,7 +465,7 @@ export function TodoBoard({
     },
   }));
 
-  function drawCard(card: Card) {
+  function drawCard(card: Card, lane: string) {
     const { hit, todo } = card;
     const key = cardKey(hit);
     const focused = key === cursorKey;
@@ -301,10 +476,15 @@ export function TodoBoard({
         type="button"
         data-card={key}
         data-testid="todo-card"
+        data-lifted={lifted === key ? "" : undefined}
         tabIndex={focused ? 0 : -1}
-        onClick={() => onOpen(hit.path, hit.line)}
+        onPointerDown={(event) => grab(event, card, { lane, column: columnOf(todo) })}
+        onClick={() => {
+          if (swallow.current) swallow.current = false;
+          else onOpen(hit.path, hit.line);
+        }}
         title={key}
-        className={`${ROW} flex min-w-0 flex-col gap-0.5 text-one-fg ${focused ? CURSOR : ""} ${coarse ? "min-h-11 justify-center" : ""}`}
+        className={`${ROW} flex min-w-0 flex-col gap-0.5 text-one-fg ${focused ? CURSOR : ""} ${coarse ? "min-h-11 justify-center" : ""} ${lifted === key ? "opacity-40" : ""}`}
       >
         {parent !== undefined && (
           <span className="w-full truncate text-[11px] text-one-muted">↳ {parent.todo.text}</span>
@@ -386,6 +566,10 @@ export function TodoBoard({
 
   const heading = "px-3 pt-2 pb-1 text-[11px] tracking-wider text-one-muted uppercase";
 
+  /** The mark a drop zone carries while the pointer brings a card over it. */
+  const marked = (name: string) => (overZone === name ? "" : undefined);
+  const lit = (name: string) => (overZone === name ? "bg-one-cursor/15" : "");
+
   return (
     <div ref={root} className="flex-1 overflow-auto py-1">
       {picker !== null && (
@@ -430,7 +614,13 @@ export function TodoBoard({
       {/* A phone has room for one column, so the tabs pick which. */}
       {coarse && (
         <div className="flex border-b border-one-line text-[11px]">
-          <div role="tablist" className="flex min-w-0 flex-1 overflow-x-auto">
+          {/* A lifted card holds the page still, so a tab scrolled out of the
+              strip could not be reached: while one is up, the tabs wrap. */}
+          <div
+            role="tablist"
+            data-carrying={lifted !== null ? "" : undefined}
+            className={`flex min-w-0 flex-1 ${lifted !== null ? "flex-wrap" : "overflow-x-auto"}`}
+          >
             {COLUMNS.map((name, index) => (
               <button
                 key={name}
@@ -442,7 +632,11 @@ export function TodoBoard({
                   setCol(index);
                   setRow(0);
                 }}
-                className={`min-h-11 shrink-0 px-3 ${index === col ? "text-one-fg" : "text-one-muted"}`}
+                // A drop on a tab sets that column's state.
+                data-over={marked(`tab:${name}`)}
+                onPointerOver={(event) => hover(event, `tab:${name}`, name)}
+                onPointerLeave={unhover}
+                className={`min-h-11 shrink-0 px-3 ${index === col ? "text-one-fg" : "text-one-muted"} ${lit(`tab:${name}`)}`}
               >
                 {COLUMN_HEADING[name]} {columns[index]?.length ?? 0}
               </button>
@@ -466,12 +660,24 @@ export function TodoBoard({
       ) : coarse ? (
         lanes
           .filter((lane) => (lane.cells[col]?.length ?? 0) > 0)
-          .map((lane) => (
-            <div key={lane.id}>
-              <h3 className={heading}>{lane.name}</h3>
-              {lane.cells[col]?.map(drawCard)}
-            </div>
-          ))
+          .map((lane) => {
+            // A drop on a lane of the column shown refiles.
+            const name = `lane:${lane.id}`;
+            const column = COLUMNS[col] ?? "open";
+            return (
+              <div
+                key={lane.id}
+                data-lane={lane.id}
+                data-over={marked(name)}
+                onPointerOver={(event) => hover(event, name, column, lane.id)}
+                onPointerLeave={unhover}
+                className={lit(name)}
+              >
+                <h3 className={heading}>{lane.name}</h3>
+                {lane.cells[col]?.map((card) => drawCard(card, lane.id))}
+              </div>
+            );
+          })
       ) : (
         <div className="grid min-w-[63rem] grid-cols-7 gap-x-1">
           {COLUMNS.map((name: Column, index) => (
@@ -486,11 +692,22 @@ export function TodoBoard({
           {lanes.map((lane) => (
             <div key={lane.id} className="col-span-7 grid grid-cols-subgrid">
               <h3 className={`${heading} col-span-7 border-t border-one-line`}>{lane.name}</h3>
-              {lane.cells.map((cell, index) => (
-                <div key={COLUMNS[index]} className="min-w-0">
-                  {cell.map(drawCard)}
-                </div>
-              ))}
+              {COLUMNS.map((column, index) => {
+                const name = `cell:${lane.id}:${column}`;
+                return (
+                  <div
+                    key={column}
+                    data-lane={lane.id}
+                    data-column={column}
+                    data-over={marked(name)}
+                    onPointerOver={(event) => hover(event, name, column, lane.id)}
+                    onPointerLeave={unhover}
+                    className={`min-w-0 ${lit(name)}`}
+                  >
+                    {lane.cells[index]?.map((card) => drawCard(card, lane.id))}
+                  </div>
+                );
+              })}
             </div>
           ))}
         </div>
