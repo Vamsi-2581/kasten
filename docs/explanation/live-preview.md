@@ -235,7 +235,14 @@ for the line to be measured again when the bytes land, the height of an image
 being unknown until then. An `https:` address is drawn too, since a clipped
 article links its pictures rather than holding them; the page's own policy
 allows images from `https:` and sends no referrer, so the host never learns
-which note asked. Any other address stays as its source.
+which note asked. Any other address stays as its source. A reference image,
+`![alt][label]`, `![alt][]` or `![alt]`, finds its address in a
+`[label]: url` definition the way a reference link does, and then draws as
+`![alt](url)` would. Any address loses its backslash escapes before it is
+drawn, opened or copied, and one in angle brackets, `<x.png>`, loses the
+brackets too, as CommonMark reads it. The parser kasten uses ends `<…>` at the
+first `>`, escaped or not, so `frontend/patches/` carries a fix to it; a bump
+of `@lezer/markdown` needs that patch made again with `bun patch`.
 
 The same brackets around a YouTube address draw the player instead, `videoId`
 in `video.ts` reading the address the pane already reads. It is the second
