@@ -1550,7 +1550,8 @@ editor does not reach a write made through the vault.
 A row that waits says for what: `⛔` and the blocker's words, or `⛔ 2` where
 it waits for more than one, with every blocker in the hover title. A blocker
 already closed is not counted, and a `⛔` naming an id no note holds shows the
-id. A row something waits for carries `→` and how many, with their words in
+id. Where two todos carry the id a `⛔` names, the blocker counts and shows the
+id, since which of the two the `⛔` meant cannot be told. A row something waits for carries `→` and how many, with their words in
 the hover title. Both are read off the lines the vault holds, and nothing is
 stored for them.
 
