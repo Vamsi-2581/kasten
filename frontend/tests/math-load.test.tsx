@@ -1,6 +1,7 @@
-import { render, waitFor } from "@testing-library/react";
+import { waitFor } from "@testing-library/react";
 import { Editor } from "@/components/editor";
 import { loadKatex } from "@/lib/math";
+import { finishParsing, renderStarved } from "./parsing";
 
 // Spied, so a test can wait on the load the formula asked for.
 vi.mock("@/lib/math", { spy: true });
@@ -22,8 +23,14 @@ function drawn(container: HTMLElement): string[] {
   );
 }
 
-/** Wait for the last load asked for to fail, rather than for a time. */
+/**
+ * Wait for the last load asked for to fail, rather than for a time.
+ *
+ * Only a parsed formula asks for KaTeX, so a parse that never reached `$x$`
+ * fails here by name rather than as a `.rejects` on `undefined` (#666).
+ */
 async function failed(): Promise<void> {
+  expect(loadKatex).toHaveBeenCalled();
   await expect(vi.mocked(loadKatex).mock.results.at(-1)?.value).rejects.toThrow();
 }
 
@@ -45,7 +52,10 @@ describe("a failed KaTeX load", () => {
     process.on("unhandledRejection", listen);
     try {
       network.down = true;
-      const { container } = render(<Editor initialDoc={"intro\n\narea $x$"} />);
+      // Starve the first parse and then finish it, so the formula is reached
+      // however busy the machine is (#666).
+      const { container } = renderStarved(<Editor initialDoc={"intro\n\narea $x$"} />);
+      finishParsing(container);
       await failed();
       // Node reports a rejection nobody handled once the microtasks drain.
       await new Promise((done) => setTimeout(done, 0));
@@ -60,13 +70,18 @@ describe("a failed KaTeX load", () => {
 
   it("#637 A8 the next formula tries the load again and draws, with no reload", async () => {
     network.down = true;
-    const first = render(<Editor initialDoc={"intro\n\narea $x$"} />);
+    // As in I5: the formula must be parsed before it asks for KaTeX (#666).
+    const first = renderStarved(<Editor initialDoc={"intro\n\narea $x$"} />);
+    finishParsing(first.container);
     await failed();
     expect(drawn(first.container)).toEqual([]);
     first.unmount();
 
     network.down = false;
-    const { container } = render(<Editor initialDoc={"intro\n\narea $y$"} />);
+    // The second formula too, or only the idle parse 500 ms later reaches it,
+    // racing the wait below (#666).
+    const { container } = renderStarved(<Editor initialDoc={"intro\n\narea $y$"} />);
+    finishParsing(container);
 
     await waitFor(() => expect(drawn(container)).toEqual(["y"]));
   });
