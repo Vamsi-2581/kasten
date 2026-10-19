@@ -29,7 +29,10 @@ afterEach(async () => {
     app = undefined;
   }
   vi.restoreAllMocks();
-  localStorage.removeItem("kasten.vim");
+  // All of it, not only the vim setting: the editor keeps each note's cursor
+  // by path (`kasten.positions.1`), and R7 and R8 both open `Y.md`, so R7's
+  // cursor on line 2 would open R8's note with that line showing its source.
+  localStorage.clear();
   // A tap far from the links. Chrome counts a tap on the spot of the one
   // before as its second, so without this a test's tap on a link reaches the
   // click as `detail` 2 when the test before tapped there too.
@@ -573,10 +576,11 @@ describe("a tap or a press on a wikilink follows it once", () => {
     "linked picture": { doc: `A line\n[![a](${CAT})](https://x.com)`, selector: "img.cm-image" },
   } as const;
 
-  // Vim on only: in CI's full frame run each vim-off case, coming after a
-  // vim-on one, never sees the new note under the finger, though it passes
-  // alone here every time (#575).
-  it.each((Object.keys(OPENED) as (keyof typeof OPENED)[]).map((kind) => [kind, "on"] as const))(
+  it.each(
+    (Object.keys(OPENED) as (keyof typeof OPENED)[]).flatMap((kind) =>
+      VIMS.map((vim) => [kind, vim] as const),
+    ),
+  )(
     "R8 #572 a double tap on a wikilink whose note opens with a %s at the same spot opens no tab with vim %s",
     async (kind, vim) => {
       const notes: Record<string, string> = {
