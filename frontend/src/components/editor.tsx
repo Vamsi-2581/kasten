@@ -12,6 +12,7 @@ import {
 } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView, keymap, lineNumbers } from "@codemirror/view";
+import type { SyntaxNode } from "@lezer/common";
 import { type CM5EditorInterface, Vim, vim } from "@replit/codemirror-vim";
 import { basicSetup } from "codemirror";
 import { useEffect, useRef } from "react";
@@ -316,27 +317,73 @@ const byName = viewCommands.of({
  *
  * A markdown link to an address opens it in a new tab, so the note stays open
  * behind it.
+ *
+ * A double-click follows once, on its first press (#569). The second is still
+ * kept from CodeMirror, which would select a word in the link and put the
+ * cursor there. The browser counts any press close to the one before as its
+ * second, so a press is a repeat only when the press before it followed.
  */
-const followOnClick = EditorView.domEventHandlers({
-  mousedown(event, view) {
-    if (!event.ctrlKey && !event.metaKey) return false;
-    const target = linkUnder(event, view);
-    if (target !== null) {
-      // Returning true makes CodeMirror cancel the mousedown, and with it the
-      // focus the browser would have moved here. The pane a link opens off is
-      // the focused one, so a click in another pane takes the focus first, the
-      // way Obsidian splits off the pane you clicked (#361). The focus event
-      // runs inside this call, so the layout hears of it before the open.
-      view.focus();
-      followLink(view, target);
+function followOnClick(): Extension {
+  watchPresses();
+  return EditorView.domEventHandlers({
+    mousedown(event, view) {
+      if (!event.ctrlKey && !event.metaKey) return false;
+      // A repeat dropped still counts as followed, so a third press is one too.
+      const again = event.detail > 1 && presses.repeat;
+      const target = linkUnder(event, view);
+      if (target !== null) {
+        // Returning true makes CodeMirror cancel the mousedown, and with it the
+        // focus the browser would have moved here. The pane a link opens off is
+        // the focused one, so a click in another pane takes the focus first, the
+        // way Obsidian splits off the pane you clicked (#361). The focus event
+        // runs inside this call, so the layout hears of it before the open.
+        if (!again) {
+          view.focus();
+          followLink(view, target);
+        }
+        presses.followed = true;
+        return true;
+      }
+      const link = urlUnder(event, view);
+      if (link === null) return false;
+      if (!again) window.open(link.address, "_blank", "noopener");
+      presses.followed = true;
       return true;
-    }
-    const link = urlUnder(event, view);
-    if (link === null) return false;
-    window.open(link.address, "_blank", "noopener");
-    return true;
-  },
-});
+    },
+  });
+}
+
+/**
+ * Whether the last press anywhere followed a link, and whether the press now
+ * down may repeat it (#569).
+ *
+ * One for the module, kept by one listener on the document in the capture
+ * phase, rather than one per view: a press on a widget never reaches the
+ * view's own handlers, a press may land in another pane, and a follow rebuilds
+ * the view for the note it opens, under the second press of a double tap.
+ */
+const presses = { followed: false, repeat: false };
+let watchingPresses = false;
+
+function watchPresses(): void {
+  if (watchingPresses) return;
+  watchingPresses = true;
+  document.addEventListener(
+    "pointerdown",
+    () => {
+      presses.repeat = presses.followed;
+      presses.followed = false;
+    },
+    true,
+  );
+}
+
+/** The `[[link]]` around `pos`, looking one way only. */
+function wikiLinkNode(state: EditorState, pos: number, side: -1 | 1): SyntaxNode | null {
+  let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, side);
+  for (; node; node = node.parent) if (node.name === "WikiLink") return node;
+  return null;
+}
 
 /**
  * The rendered `[text](url)` or reference link under the pointer, if it opens in a tab.
@@ -367,6 +414,18 @@ function linkUnder(event: Event, view: EditorView): string | null {
 }
 
 /**
+ * Where the rendered `[[link]]` under the pointer starts and ends, off a drawn table.
+ *
+ * Looking forwards only: the span starts past the hidden `[[`, or past the
+ * alias bar, so the position is always inside the link.
+ */
+function wikiLinkRangeUnder(event: Event, view: EditorView): SyntaxNode | null {
+  const element = event.target instanceof HTMLElement ? event.target.closest(".cm-wikilink") : null;
+  if (element === null) return null;
+  return wikiLinkNode(view.state, view.posAtDOM(element), 1);
+}
+
+/**
  * A tap follows a link, a finger having no ctrl to hold.
  *
  * Read on the way down and acted on at the click, because the two halves are
@@ -377,11 +436,13 @@ function linkUnder(event: Event, view: EditorView): string | null {
  *
  * A link the cursor is already in is one being edited, and a tap in it moves
  * the cursor as a tap anywhere else does. The way into a link is from beside
- * it. A markdown link to an address opens in a new tab, as on ctrl+click.
+ * it. A markdown link to an address opens in a new tab, as on ctrl+click. A
+ * double tap follows once, as a double-click does.
  */
 function followOnTap(): Extension {
   let landed: string | null = null;
   let landedUrl: string | null = null;
+  watchPresses();
   return EditorView.domEventHandlers({
     pointerdown(event, view) {
       const touch = event.pointerType === "touch";
@@ -391,7 +452,14 @@ function followOnTap(): Extension {
       // its source while it is, so one of the same name elsewhere is not it.
       const drawn =
         event.target instanceof Element && event.target.closest(".cm-table-block") !== null;
-      const editing = !drawn && wikiLinkAt(view.state, head) === target;
+      // The link the cursor is in by its place, not its name: another link to
+      // the same note is not the one being edited (#568). Both ends count, as
+      // in `wikiLinkAt`, which is where `$` lands on a line ending in a link.
+      // Between `[[a]][[b]]` the cursor touches both, and it is in the one
+      // `wikiLinkAt` would read, forwards first.
+      const range = target === null || drawn ? null : wikiLinkRangeUnder(event, view);
+      const here = wikiLinkNode(view.state, head, 1) ?? wikiLinkNode(view.state, head, -1);
+      const editing = range !== null && here !== null && here.from === range.from;
       landed = editing ? null : target;
       const link = touch ? urlUnder(event, view) : null;
       landedUrl = link !== null && (head < link.from || head > link.to) ? link.address : null;
@@ -404,12 +472,21 @@ function followOnTap(): Extension {
       landedUrl = null;
       return false;
     },
-    click(_event, view) {
-      if (landed !== null) followLink(view, landed);
-      else if (landedUrl !== null) window.open(landedUrl, "_blank", "noopener");
-      else return false;
+    click(event, view) {
+      if (landed === null && landedUrl === null) return false;
+      const note = landed;
+      const address = landedUrl;
       landed = null;
       landedUrl = null;
+      // A double tap's second click is kept and does nothing (#569). Off a
+      // table the first tap has put the cursor in the link, which turns the
+      // second away too; in a drawn table the cursor never moves in. Chrome
+      // counts any tap close to the one before as its second, so the click is
+      // a repeat only when the tap before it followed, a dropped one included.
+      presses.followed = true;
+      if (event.detail > 1 && presses.repeat) return true;
+      if (note !== null) followLink(view, note);
+      else if (address !== null) window.open(address, "_blank", "noopener");
       return true;
     },
   });
@@ -1044,7 +1121,7 @@ export function Editor({
           // every paste that carries text.
           imagePaste(),
           noticeHandler.of((message) => onNoticeRef.current?.(message)),
-          followOnClick,
+          followOnClick(),
           followOnTap(),
           byName,
           vault.of(

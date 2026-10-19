@@ -1941,12 +1941,15 @@ not the link. A click in a pane that is not focused focuses it first, so the
 link opens off the pane you clicked, as in Obsidian. With live preview off
 there is no rendered link to click, and `gf` is the way. Ctrl+click and a tap
 work on a wikilink in a drawn table's cell too; a plain click there opens the
-table.
+table. A tap on the wikilink the cursor is in moves the cursor, since that is
+the link being edited; a tap on any other link follows it, one to the same
+note included. A double tap or a double Ctrl+click follows once.
 
 Ctrl+click or a tap on a markdown link, `[mail](https://mail.google.com/...)`,
 opens its address in a new tab. Only an address with a scheme opens; a
 relative one such as `[notes](notes.md)` does nothing. A tap on the markdown
-link the cursor is in moves the cursor, as on a wikilink. A picture inside such
+link the cursor is in moves the cursor, as on a wikilink. A double tap or a
+double Ctrl+click opens one tab. A picture inside such
 a link, `[![a](cat.png)](https://example.com)`, opens it on any click or a tap,
 no Ctrl needed, and a double-click opens it once. The same holds for a link in
 a drawn table's cell; a plain click or a tap anywhere else in the cell opens the
