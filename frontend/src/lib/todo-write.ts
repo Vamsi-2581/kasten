@@ -16,13 +16,12 @@ import {
   cycleLine,
   formatTodo,
   isOpen,
-  masked,
   parseTodo,
   patchLine,
   setStateOn,
-  TAG,
   type Todo,
   type TodoState,
+  todoTagsOn,
   wordsEnd,
 } from "@/lib/todo";
 import { nextOccurrence } from "@/lib/todo-recur";
@@ -499,15 +498,14 @@ function clientAt(lines: string[], line: number): boolean {
 }
 
 /**
- * Where `line` carries `#agent` as a tag of its own, as offsets. `TAG` is the
- * parser's reading, so `#agents` and `#agent/x` are other tags; it runs on the
- * mask, so one inside a code span or a link is text, and one with no space
- * before it is part of a word, `https://a.io/p#agent`.
+ * Where `line` carries `#agent` as a tag of its own, as offsets. The parser's
+ * own reading, so `#agents` and `#agent/x` are other tags, and one in a code
+ * span, a link, `https://a.io/p#agent` or a field's value is text.
  */
 function agentTags(line: string): number[] {
-  return [...masked(line).matchAll(TAG)]
-    .filter((found) => found[0] === AGENT && /[ \t]/.test(line[found.index - 1] ?? ""))
-    .map((found) => found.index);
+  return todoTagsOn(line)
+    .filter((found) => found.tag === AGENT)
+    .map((found) => found.at);
 }
 
 /**
@@ -551,10 +549,20 @@ export function agentPress(
   // already hold it, and pulling the tag would not stop it.
   if (todo.state !== "open") return { why: "that todo is already with the agent" };
 
-  // Each with the space before it, which `agentTags` makes sure is there. Last
-  // first, so the earlier offsets still hold.
+  // Each with the space before it where there is one, which is the space the
+  // press above wrote; `fix,#agent` has none to give. Last first, so the
+  // earlier offsets still hold.
   let out = line;
-  for (const at of tags.reverse()) out = out.slice(0, at - 1) + out.slice(at + AGENT.length);
+  for (const at of tags.reverse()) {
+    const from = /[ \t]/.test(out[at - 1] ?? "") ? at - 1 : at;
+    out = out.slice(0, from) + out.slice(at + AGENT.length);
+  }
+  // `fix,#agent#kasten` would leave `#kasten` after the comma, a tag it was
+  // not, so a take-back that changes any other tag writes nothing.
+  const others = todo.tags.filter((tag) => tag !== AGENT).join(" ");
+  if (parseTodo(out)?.tags.join(" ") !== others) {
+    return { why: "taking #agent out would make a tag of what follows it" };
+  }
   return { line: out };
 }
 
