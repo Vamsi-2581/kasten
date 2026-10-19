@@ -4,7 +4,7 @@ import { ReviewSession } from "@/components/review-session";
 import * as api from "@/lib/api";
 import { readClock } from "@/lib/clock";
 import { noteBase } from "@/lib/note-base";
-import { type Deck, decksFrom } from "@/lib/review";
+import { type Deck, decksFrom, type Limits } from "@/lib/review";
 import { shownCard } from "./review-card";
 
 /** What the session hands a shell to put its keys over. */
@@ -924,7 +924,8 @@ describe("ReviewSession under a daily limit", () => {
     `Due one?::a ${DUE}\n\nDue two?::a ${DUE}\n\nDue three?::a ${DUE}\n\n` +
     "New one?::a\n\nNew two?::a\n\nNew three?::a\n";
 
-  function renderLimited() {
+  /** `cached` is a stale answer the limits query already holds, as the overview leaves it. */
+  function renderLimited(cached?: Limits) {
     vi.spyOn(api, "fetchNote").mockImplementation((path: string) =>
       Promise.resolve(path === "99 Misc/01 Config/decks.md" ? "trivia: 1 new, 2 reviews\n" : CARDS),
     );
@@ -932,6 +933,7 @@ describe("ReviewSession under a daily limit", () => {
       Promise.resolve({ path, content }),
     );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    if (cached !== undefined) client.setQueryData(["cards", "limits"], cached);
     render(
       <QueryClientProvider client={client}>
         <ReviewSession deck={TRIVIA} onLeave={vi.fn()} />
@@ -963,6 +965,14 @@ describe("ReviewSession under a daily limit", () => {
 
     expect(asked).toEqual(["Due one?", "Due two?", "New one?"]);
     expect(await screen.findByTestId("review-done")).toHaveTextContent("3 answered");
+  });
+
+  it("#612 B1 a sitting started on a stale cache of the limits waits for their refetch", async () => {
+    // Read before `decks.md` gained its line, which invalidated nothing.
+    renderLimited({ note: "", defaults: { new_per_day: null, reviews_per_day: null } });
+    await shownCard();
+
+    expect(screen.getByText(/^\d+ left$/).textContent).toBe("3 left");
   });
 });
 
@@ -1021,12 +1031,23 @@ describe("ReviewSession undoing the last step (#600)", () => {
    * The vault refuses a write whose base is not the hash of the text it holds,
    * the way the backend's conditional `PUT` does, so a refusal here comes of the
    * base the sitting named and never of a rejection set up for the test.
+   *
+   * `decksNote` given as a list is one answer per read of `decks.md`, the last
+   * kept, so a test can change the note under a running sitting.
    */
-  function renderVault(start = TWO, deck: Deck = { ...DECK, fresh: 2 }, decksNote = "") {
+  function renderVault(
+    start = TWO,
+    deck: Deck = { ...DECK, fresh: 2 },
+    decksNote: string | string[] = "",
+  ) {
     const vault = { disk: start };
-    vi.spyOn(api, "fetchNote").mockImplementation(async (path: string) =>
-      path === "99 Misc/01 Config/decks.md" ? decksNote : vault.disk,
-    );
+    const answers = [decksNote].flat();
+    const decks = { reads: 0 };
+    vi.spyOn(api, "fetchNote").mockImplementation(async (path: string) => {
+      if (path !== "99 Misc/01 Config/decks.md") return vault.disk;
+      decks.reads += 1;
+      return answers[Math.min(decks.reads, answers.length) - 1] ?? "";
+    });
     const saved = vi
       .spyOn(api, "saveNote")
       .mockImplementation(async (path: string, content: string, _keep?: boolean, base?: string) => {
@@ -1040,7 +1061,13 @@ describe("ReviewSession undoing the last step (#600)", () => {
         <ReviewSession deck={deck} onLeave={vi.fn()} />
       </QueryClientProvider>,
     );
-    return { vault, saved };
+    return { vault, saved, decks };
+  }
+
+  /** Wait for the `reads`th read of the limits, and for whatever it set off. */
+  async function refetched(read: () => number, reads: number) {
+    await waitFor(() => expect(read()).toBe(reads));
+    await act(async () => {});
   }
 
   const undoButton = () => screen.queryByRole("button", { name: "Undo" });
@@ -1512,5 +1539,71 @@ describe("ReviewSession undoing the last step (#600)", () => {
     await act(async () => release?.());
     await backOn("What is a VPC?");
     expect(screen.getByRole("button", { name: "Jot it" })).not.toBeDisabled();
+  });
+
+  it("#612 A1 a rating's refetch of a changed decks.md does not build the queue again", async () => {
+    const { decks } = renderVault(TWO, { ...DECK, fresh: 2 }, ["", "aws: 5 new\n"]);
+    await shownCard();
+    await rate("Good");
+    await refetched(() => decks.reads, 2);
+
+    expect(screen.getByTestId("review-card")).toHaveTextContent("What is S3?");
+    expect(screen.getByText(/^\d+ left$/).textContent).toBe("1 left");
+    const reads = vi.mocked(api.fetchNote).mock.calls.filter(([path]) => path === "decks/aws.md");
+    expect(reads).toHaveLength(1);
+  });
+
+  it("#612 A2 a card rated Again keeps its second asking across that refetch", async () => {
+    const { decks } = renderVault(TWO, { ...DECK, fresh: 2 }, ["", "aws: 5 new\n"]);
+    await shownCard();
+    await rate("Again");
+    await refetched(() => decks.reads, 2);
+    await rate("Good");
+
+    expect(screen.getByText(/^\d+ left$/).textContent).toBe("1 left");
+    expect(screen.getByTestId("review-card")).toHaveTextContent("What is a VPC?");
+  });
+
+  it("#612 A3 the count left does not jump back when decks.md cuts the limit after a rating", async () => {
+    const { decks } = renderVault(TWO, { ...DECK, fresh: 2 }, ["", "aws: 1 new\n"]);
+    await shownCard();
+    await rate("Good");
+    await refetched(() => decks.reads, 2);
+
+    expect(screen.getByText(/^\d+ left$/).textContent).toBe("1 left");
+    expect(screen.getByTestId("review-card")).toHaveTextContent("What is S3?");
+  });
+
+  it("#612 A4 an undo puts back the queue behind the card when decks.md changes on every read", async () => {
+    const { decks } = renderVault(TWO, { ...DECK, fresh: 2 }, ["", "aws: 2 new\n", "aws: 1 new\n"]);
+    await shownCard();
+    await rate("Good");
+    await refetched(() => decks.reads, 2);
+
+    const undo = undoButton();
+    expect(undo).not.toBeNull();
+    fireEvent.click(undo as HTMLElement);
+    await backOn("What is a VPC?");
+    await refetched(() => decks.reads, 3);
+
+    expect(screen.getByText(/^\d+ left$/).textContent).toBe("2 left");
+    fireEvent.click(screen.getByRole("button", { name: "Good" }));
+    await act(async () => {});
+    expect(screen.getByTestId("review-card")).toHaveTextContent("What is S3?");
+  });
+
+  it("#612 I3 a refetch that changes only the default limits builds nothing again", async () => {
+    let reads = 0;
+    vi.spyOn(api, "fetchReviewLimits").mockImplementation(async () => {
+      reads += 1;
+      return { new_per_day: reads === 1 ? null : 1, reviews_per_day: null };
+    });
+    renderVault();
+    await shownCard();
+    await rate("Good");
+    await refetched(() => reads, 2);
+
+    expect(screen.getByText(/^\d+ left$/).textContent).toBe("1 left");
+    expect(screen.getByTestId("review-card")).toHaveTextContent("What is S3?");
   });
 });
