@@ -58,6 +58,9 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
     replay: () => void;
   } | null>(null);
   const panel = useRef<HTMLElement>(null);
+  // A ref and not the leader's `pending`: `za` handed to `leaderAction` would
+  // run whatever `<leader>a` is.
+  const zee = useRef(false);
 
   const onControls = useCallback((given: typeof controls.current) => {
     controls.current = given;
@@ -101,11 +104,27 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
     const target = event.target as HTMLElement;
     if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
 
+    // `za` folds, the way it folds in vim. A `z` followed by anything else is
+    // dropped and the key after it runs as itself, so a stray `z` costs no `j`.
+    if (zee.current) {
+      zee.current = false;
+      if (screen.at === "decks" && key === "a") {
+        fold(panel.current);
+        event.preventDefault();
+        return;
+      }
+    }
+    if (screen.at === "decks" && key === "z") {
+      zee.current = true;
+      event.preventDefault();
+      return;
+    }
+
     // The overview is showing. The browser moves the focus between buttons on
     // Tab and nothing else, so `j` and `k` do it here, and `l` presses the one
     // focused the way Enter on a focused button already does.
     if (screen.at === "decks" && (key === "j" || key === "k" || key === "l")) {
-      walk(panel.current, "button[data-deck]:not(:disabled)", key);
+      walk(panel.current, deckStops(panel.current), key);
       event.preventDefault();
       return;
     }
@@ -113,7 +132,11 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
     // The same walk over a different selector. `data-parked` and not
     // `data-deck`, so neither screen's keys can reach the other's rows.
     if (screen.at === "parked" && (key === "j" || key === "k")) {
-      walk(panel.current, "button[data-parked]", key);
+      walk(
+        panel.current,
+        [...(panel.current?.querySelectorAll<HTMLButtonElement>("button[data-parked]") ?? [])],
+        key,
+      );
       event.preventDefault();
       return;
     }
@@ -202,17 +225,39 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
 }
 
 /**
- * Move the focus between the rows a selector names, or press the one focused.
+ * Where `j` and `k` stop on the overview: every row that can be sat, and the
+ * fold toggle of a row that cannot.
+ *
+ * A daily limit can leave a parent with nothing to offer above a subdeck that
+ * has cards, and a walk over enabled rows alone would never reach the toggle
+ * that shows that subdeck. In the order drawn, so the toggle sits where its row
+ * does.
+ */
+function deckStops(panel: HTMLElement | null): HTMLButtonElement[] {
+  const buttons = panel?.querySelectorAll<HTMLButtonElement>(
+    "button[data-deck], button[data-fold]",
+  );
+  return [...(buttons ?? [])].filter((button) =>
+    button.dataset.fold === undefined
+      ? !button.disabled
+      : button.closest("li")?.querySelector<HTMLButtonElement>("button[data-deck]")?.disabled ===
+        true,
+  );
+}
+
+/**
+ * Move the focus between rows, or press the one focused.
  *
  * Two screens draw a list of buttons and neither is in the tab order, so the
- * walk is the same and only the selector differs. Neither wraps: the first and
- * the last are where the list ends, which is what tells you so without looking.
+ * walk is the same and only the rows differ. Neither wraps: the first and the
+ * last are where the list ends, which is what tells you so without looking.
  */
-function walk(panel: HTMLElement | null, selector: string, key: string): void {
-  const rows = [...(panel?.querySelectorAll<HTMLButtonElement>(selector) ?? [])];
+function walk(panel: HTMLElement | null, rows: HTMLButtonElement[], key: string): void {
   const at = rows.indexOf(document.activeElement as HTMLButtonElement);
   if (key === "l") {
     rows[at]?.click();
+    // A fold toggle stays where it is, and so does the cursor on it.
+    if (rows[at]?.dataset.fold !== undefined) return;
     // The row it pressed goes with the overview, taking the focus to the body
     // with it, and no key of the sitting would reach the pane after that.
     panel?.focus();
@@ -220,4 +265,36 @@ function walk(panel: HTMLElement | null, selector: string, key: string): void {
   }
   const by = key === "j" ? 1 : -1;
   rows[at === -1 ? 0 : Math.min(Math.max(at + by, 0), rows.length - 1)]?.focus();
+}
+
+/**
+ * Fold or unfold the deck under the cursor by pressing its toggle.
+ *
+ * On a deck with nothing under it, the deck above is folded instead, the way
+ * vim's `za` inside a fold closes the fold around it. The row the cursor was on
+ * goes with that fold, so the cursor moves up to the parent's row, or to the
+ * parent's toggle where a row with nothing to offer cannot take the focus.
+ */
+function fold(panel: HTMLElement | null): void {
+  const focused = document.activeElement as HTMLElement | null;
+  const name = focused?.dataset.deck ?? focused?.dataset.fold;
+  if (panel === null || name === undefined) return;
+  // By the attribute's value rather than a selector built from it, which a
+  // deck name holding a quote would break.
+  const find = (attribute: "deck" | "fold", wanted: string) =>
+    [...panel.querySelectorAll<HTMLButtonElement>(`button[data-${attribute}]`)].find(
+      (button) => button.dataset[attribute] === wanted,
+    );
+
+  const own = find("fold", name);
+  if (own !== undefined) {
+    own.click();
+    return;
+  }
+  const parent = name.slice(0, name.lastIndexOf("/"));
+  const toggle = name.includes("/") ? find("fold", parent) : undefined;
+  if (toggle === undefined) return;
+  toggle.click();
+  const row = find("deck", parent);
+  (row === undefined || row.disabled ? toggle : row).focus();
 }
