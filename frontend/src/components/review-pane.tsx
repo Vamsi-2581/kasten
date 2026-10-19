@@ -51,11 +51,13 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
   const [screen, setScreen] = useState<Screen>({ at: "decks" });
   const [pending, setPending] = useState("");
   const controls = useRef<{
+    showing: boolean;
     reveal: () => void;
     rate: (rating: Rating) => void;
     suspend: () => void;
     capture: () => void;
     replay: () => void;
+    undo: () => void;
   } | null>(null);
   const panel = useRef<HTMLElement>(null);
   // A ref and not the leader's `pending`: `za` handed to `leaderAction` would
@@ -174,7 +176,8 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
       return;
     }
 
-    if (key === " " && controls.current === null) {
+    // The leader wherever no card is on screen, the done screen holding Undo too.
+    if (key === " " && !controls.current?.showing) {
       setPending(key);
       event.preventDefault();
       return;
@@ -189,6 +192,8 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
     else if (key === "n") controls.current?.capture();
     // The side showing, so the front before the reveal and the back after it.
     else if (key === "r") controls.current?.replay();
+    // The parked screen's `u` returned above, so this one is the sitting's.
+    else if (key === "u") controls.current?.undo();
     else if (key === "q") onClose();
     else return;
 

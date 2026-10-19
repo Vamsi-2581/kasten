@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ReviewDecks } from "@/components/review-decks";
 import { ReviewPane } from "@/components/review-pane";
 import * as api from "@/lib/api";
@@ -61,13 +61,13 @@ function seededClient(hits: api.SearchHit[], archive = false) {
  * out, as a refetch on mount, and `ReviewDecks reading the deck notes` below
  * is where the wait itself is tested.
  */
-async function renderPane() {
+async function renderPane(commands = stubCommands()) {
   vi.spyOn(api, "fetchCards").mockResolvedValue(HITS);
   serveNotes(HITS);
   const client = seededClient(HITS);
   render(
     <QueryClientProvider client={client}>
-      <ReviewPane commands={stubCommands()} onClose={vi.fn()} onOpen={vi.fn()} />
+      <ReviewPane commands={commands} onClose={vi.fn()} onOpen={vi.fn()} />
     </QueryClientProvider>,
   );
   // `get` and not `find`: nothing is left to wait on.
@@ -435,6 +435,124 @@ describe("ReviewPane suspending the card on screen", () => {
 
     fireEvent.keyDown(pane, { key: "s" });
 
+    expect(screen.getByTestId("review-card")).toHaveTextContent("e");
+  });
+});
+
+describe("ReviewPane undoing the last step (#600)", () => {
+  const TWO = "#flashcards/beta\n\nc::d\n\ne::f\n";
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  /**
+   * The pane's sitting of `beta`, its vault answering each write with what was sent.
+   *
+   * Only `b.md` reads as `note`, so `decks.md` reads the same before and after
+   * the rating's refetch, and the sitting is not built again under the test.
+   */
+  async function sitBeta(note: string, commands = stubCommands()) {
+    const pane = await renderPane(commands);
+    vi.spyOn(api, "fetchNote").mockImplementation((path) =>
+      Promise.resolve(path === "b.md" ? note : ""),
+    );
+    const saved = vi
+      .spyOn(api, "saveNote")
+      .mockImplementation(async (path: string, content: string) => ({ path, content }));
+    fireEvent.keyDown(pane, { key: "j" });
+    fireEvent.keyDown(pane, { key: "j" });
+    fireEvent.keyDown(pane, { key: "l" });
+    expect(await shownCard()).toHaveTextContent("c");
+    return { pane, saved };
+  }
+
+  it.each(["on", "off"])(
+    "#600 A5 u takes back the last rating on the sitting screen, vim %s",
+    async (vim) => {
+      localStorage.setItem("kasten.vim", vim);
+      const { pane, saved } = await sitBeta(TWO);
+
+      fireEvent.keyDown(pane, { key: " " });
+      fireEvent.keyDown(pane, { key: "3" });
+      expect(screen.getByTestId("review-card")).toHaveTextContent("e");
+      await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+
+      fireEvent.keyDown(pane, { key: "u" });
+
+      await waitFor(() => expect(saved).toHaveBeenCalledTimes(2));
+      expect(saved.mock.calls[1]?.[1]).toBe(TWO);
+      await waitFor(() => expect(screen.getByTestId("review-card")).toHaveTextContent("c"));
+      expect(screen.getByTestId("review-back")).toHaveTextContent("d");
+    },
+  );
+
+  it("#600 I1 u on the done screen brings back the last card rated", async () => {
+    const { pane, saved } = await sitBeta("#flashcards/beta\n\nc::d\n");
+
+    fireEvent.keyDown(pane, { key: " " });
+    fireEvent.keyDown(pane, { key: "3" });
+    expect(screen.getByTestId("review-done")).toBeInTheDocument();
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+
+    fireEvent.keyDown(pane, { key: "u" });
+
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(2));
+    expect(saved.mock.calls[1]?.[1]).toBe("#flashcards/beta\n\nc::d\n");
+    await waitFor(() => expect(screen.getByTestId("review-card")).toHaveTextContent("c"));
+    expect(screen.getByTestId("review-back")).toHaveTextContent("d");
+  });
+
+  it("#600 B3 space on the done screen holding Undo starts the leader, and reveals nothing", async () => {
+    const commands = stubCommands();
+    const { pane } = await sitBeta("#flashcards/beta\n\nc::d\n", commands);
+    fireEvent.keyDown(pane, { key: " " });
+    fireEvent.keyDown(pane, { key: "3" });
+    expect(screen.getByTestId("review-done")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Undo" })).not.toBeNull();
+
+    fireEvent.keyDown(pane, { key: " " });
+    fireEvent.keyDown(pane, { key: "b" });
+
+    expect(commands.toggleTree).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("review-done")).toBeInTheDocument();
+  });
+
+  it("#600 B6 a header button clicked before u keeps the focus, and the keys, in the pane", async () => {
+    const { pane, saved } = await sitBeta(TWO);
+    const suspend = screen.getByRole("button", { name: "Suspend" });
+    // A mouse click focuses the button before it presses it.
+    suspend.focus();
+    fireEvent.click(suspend);
+    expect(screen.getByTestId("review-card")).toHaveTextContent("e");
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    let release: (() => void) | undefined;
+    saved.mockImplementationOnce(
+      (path: string, content: string) =>
+        new Promise((resolve) => {
+          release = () => resolve({ path, content });
+        }),
+    );
+
+    fireEvent.keyDown(suspend, { key: "u" });
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(2));
+
+    // Greyed and still focused while the undo is out: a disabled button would
+    // have handed the focus to the body.
+    expect(suspend).toHaveAttribute("aria-disabled", "true");
+    expect(suspend).not.toBeDisabled();
+    expect(document.activeElement).toBe(suspend);
+
+    await act(async () => release?.());
+    await waitFor(() => expect(screen.getByTestId("review-card")).toHaveTextContent("c"));
+    expect(pane.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "3" });
+
+    await waitFor(() => expect(saved).toHaveBeenCalledTimes(3));
     expect(screen.getByTestId("review-card")).toHaveTextContent("e");
   });
 });
