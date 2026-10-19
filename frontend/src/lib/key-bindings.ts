@@ -58,6 +58,8 @@ export interface EditorCommands {
   searchNotes(): void;
   /** Open the todo overlay, which ranks every todo the vault holds. */
   findTodos(): void;
+  /** Open the book finder, which lists every note with an epub beside it. */
+  findBook(): void;
   /** Put the todo list in the focused pane, replacing whatever was there. */
   openTodos(): void;
   /** Show what links to the open note. Needs one open, as its opposite does. */
@@ -257,6 +259,11 @@ export const LEADER: readonly LeaderBinding[] = [
   // `e` moves the focus and this moves the cursor with it, which is what VS
   // Code calls revealing a file and nvim-tree calls finding one.
   { key: "E", label: "Show the open note in the file tree", command: "revealTree" },
+  // The fourth of the `f` group, for the reason `ft` is in it: a book is picked
+  // by name. It opens the reader and not the note, which is what sets it apart
+  // from `ff` and from `gr`, the key that needs the note open first. First in
+  // the group because the list is alphabetical.
+  { key: "fb", label: "Find a book", command: "findBook" },
   // Telescope spells `find_files` this way, and the shape matches `cf` and `rf`
   // beside it: the group letter, then the thing.
   { key: "ff", label: "Find a note", command: "findNote" },
