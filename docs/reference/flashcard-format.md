@@ -38,7 +38,8 @@ card, whatever is written in it.
 
 A deck tag is a tag by [the one tag rule](/reference/tag-format.md), so it ends
 where any tag ends: `(#flashcards/es)` names the deck `es`, not `es)`, and
-`#flashcardsx` is another tag and names no deck. A deck tag at the head of a
+`#flashcardsx` is another tag and names no deck. A deck tag inside an HTML
+comment, on one line or several, names no deck. A deck tag at the head of a
 card counts as the card's only when a space follows it, so
 `#flashcards/es) q::a` puts the whole note in `es`, not just that card.
 

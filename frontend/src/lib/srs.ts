@@ -38,7 +38,9 @@
  * ```
  *
  * Which decks a card is in is read here, off `deck-tag.ts`'s rule, because this
- * is the reader that sees the note whole. A `::` is a common enough thing to
+ * is the reader that sees the note whole. A deck tag inside an HTML comment,
+ * on one line or several, names no deck, the comments being found by the
+ * editor's parser, as the editor shows no tag there. A `::` is a common enough thing to
  * type that reading every one of them as a card would fill the queue with C++
  * and YAML, so a card in no deck at all is not a card, to the overview and the
  * sitting alike.
@@ -67,6 +69,7 @@ import {
 import { shiftDay } from "@/lib/clock";
 import { cardTags, deckName, deckTags, onlyTags, withoutTags } from "@/lib/deck-tag";
 import { readField, setField } from "@/lib/note-frontmatter";
+import { noteLanguage } from "@/lib/note-language";
 
 /** How well a card went, in the four steps Anki asks for. */
 export type Rating = "again" | "hard" | "good" | "easy";
@@ -263,6 +266,37 @@ function clozeCards(
 }
 
 /**
+ * kasten's markdown under its frontmatter, as the editor parses a note. One
+ * for the module, the parser holding no state between two notes.
+ */
+const notes = noteLanguage().language.parser;
+
+/**
+ * `text` with every HTML comment the editor finds blanked, each line where it was.
+ *
+ * The editor's parser and not a line at a time, because a comment may run over
+ * several lines and a reader of one line cannot tell a tag inside one from a
+ * tag outside it. Comments only: the parser also hides tags in an HTML block
+ * such as `<img>`, which runs on to the blank line, and a deck tag under one
+ * is a deck the note always had. The newlines stay, so a line's index is the
+ * one card detection gave it.
+ */
+function withoutComments(text: string): string {
+  let out = "";
+  let at = 0;
+  notes.parse(text).iterate({
+    enter(node) {
+      if (node.name !== "CommentBlock" && node.name !== "Comment") return;
+      out += text.slice(at, node.from) + text.slice(node.from, node.to).replace(/[^\n]/g, " ");
+      at = node.to;
+      // Nothing inside a comment is a second comment.
+      return false;
+    },
+  });
+  return out + text.slice(at);
+}
+
+/**
  * Every card the note holds, in the order they are written.
  *
  * Two passes rather than one. The `?` cards are found first and their lines
@@ -403,9 +437,9 @@ export function parseCards(text: string, note = ""): Card[] {
   // Last, and before the sort, `owned` running in the order the cards were
   // pushed. Every tag no card claimed is the note's, and the two add rather
   // than replace: a card about two things is asked in both decks.
-  const noteDecks = lines.flatMap((line, at) =>
-    fenced[at] || claimed.has(at) ? [] : deckTags(line),
-  );
+  const noteDecks = withoutComments(text)
+    .split("\n")
+    .flatMap((line, at) => (fenced[at] || claimed.has(at) ? [] : deckTags(line)));
   for (const [at, card] of cards.entries()) {
     card.decks = [
       ...new Set([...noteDecks, ...(owned[at] ?? [])].map((tag) => deckName(tag, note))),

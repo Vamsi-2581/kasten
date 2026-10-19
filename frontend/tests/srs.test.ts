@@ -1235,3 +1235,38 @@ describe("a comment the import escaped in a code span (#356)", () => {
     expect(card?.back).toBe("==<!--anki:7:0--> a::b==");
   });
 });
+
+describe("#660 a schedule comment on its own line opens no comment block", () => {
+  it("#660 I2 a deck tag under a schedule line still names its deck", () => {
+    const text = [
+      "#flashcards/a",
+      "",
+      "front",
+      "?",
+      "back",
+      "<!--SR:!2026-08-20,4,270-->",
+      "The capital of France is {{c1::Paris}}.",
+      "?",
+      "On the Seine.",
+      "<!--SR:c1!2026-08-20,4,270-->",
+      "#flashcards/b",
+      "q::a",
+    ].join("\n");
+
+    expect(parseCards(text).map((card) => card.decks)).toEqual([
+      ["a", "b"],
+      ["a", "b"],
+      ["a", "b"],
+    ]);
+  });
+});
+
+describe("#660 only a comment hides a deck tag", () => {
+  it("#660 B a deck tag under an html block line still names its deck", () => {
+    expect(parseCards('<img src="a.png">\n#flashcards/x\n\nq::a')[0]?.decks).toEqual(["x"]);
+  });
+
+  it("#660 B a deck tag in a tilde fence still names its deck", () => {
+    expect(parseCards("~~~\n#flashcards/x\n~~~\n\nq::a")[0]?.decks).toEqual(["x"]);
+  });
+});
