@@ -353,6 +353,37 @@ export function endsOfWords(line: string, fields?: number[]): number[] {
 }
 
 /**
+ * Where the words of a todo line end: before its first field that parses, else
+ * before a trailing `^blockid`, else at the line's end. An offset into the
+ * whole line, so a tag written there leaves every other byte where it was, and
+ * a space or the line's end always follows it.
+ *
+ * Only fields that parse count, as for a stamp: `📅 friday` is words.
+ */
+export function wordsEnd(line: string): number {
+  const found = LINE.exec(line);
+  if (found?.[3] === undefined) return line.length;
+  const rest = found[3];
+  const offset = line.length - rest.length;
+  const mask = masked(rest);
+  const fields = ORDER.flatMap((pattern) => {
+    const field = find(pattern, rest, mask);
+    return field === null ? [] : [offset + field.from];
+  });
+  // Only a place a space or the line's end follows. A field typed hard against
+  // the words, `foo📅`, would need a space after the tag too, which taking the
+  // tag back out could not tell from one typed; the tag then goes past every
+  // field rather than between two of them. A `^` with no space before it is
+  // ruled out the same way, `2^10` being words and no block id.
+  const spaced = (at: number) => /^(?:[ \t]|$)/.test(line.slice(at));
+  const ends = endsOfWords(line, fields);
+  const first = ends[0] ?? line.length;
+  if (spaced(first)) return first;
+  // Past the fields: the block id's place, then the line's end.
+  return ends.slice(fields.length).find(spaced) ?? line.length;
+}
+
+/**
  * The fields a state change or a field write puts on or takes off, each
  * spelled as `tail` spells it. In `ORDER`'s sequence, so a stop writing `⏱` and
  * `🆔` together finds the one when it places the other. `⛔` is not here: a

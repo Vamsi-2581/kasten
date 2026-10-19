@@ -26,6 +26,7 @@ import { expandShorthand } from "@/lib/todo-shorthand";
 import { parseSession } from "@/lib/todo-time";
 import {
   addTodoWrites,
+  agentPress,
   applyBlocked,
   blockLine,
   type Closed,
@@ -392,6 +393,32 @@ function rowLine(text: string, hit: SearchHit, twins?: number[]): number | null 
     return now[twins.indexOf(hit.line)] ?? null;
   }
   return lineOf(text, hit.line, hit.text) ?? (sameTodo(text, hit) ? hit.line : null);
+}
+
+/**
+ * The note as `@` on the row leaves it, and the line it wrote, or why it leaves
+ * the note as it is.
+ *
+ * Of the note's text rather than the vault: the route reads and saves it inside
+ * its write queue, with the guards a note open to type in needs, as `m` does.
+ * The row is found the way a state press finds it, so `@` never tags another
+ * todo, and one line is all that changes. A second press before the list
+ * redraws comes with the line the first wrote, which the route kept: the words
+ * changed, and nothing in the note can tell this todo from another of them.
+ */
+export function agentTodoIn(
+  text: string,
+  hit: SearchHit,
+  today: string,
+  twins?: number[],
+): { text: string; line: string } | { why: string } {
+  const at = rowLine(text, hit, twins);
+  if (at === null) return { why: "that line has changed since it was listed" };
+  const lines = text.split("\n");
+  const pressed = agentPress(lines, at, today, newId());
+  if ("why" in pressed) return pressed;
+  lines[at - 1] = pressed.line;
+  return { text: lines.join("\n"), line: pressed.line };
 }
 
 /** Read what the press needs, work out the writes, and send them. */

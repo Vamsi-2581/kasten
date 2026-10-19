@@ -29,7 +29,7 @@ import { ReviewPane } from "@/components/review-pane";
 import { StatusBar } from "@/components/status-bar";
 import { TerminalPane } from "@/components/terminal-pane";
 import { TerminalPrompt } from "@/components/terminal-prompt";
-import { TodoPane } from "@/components/todo-pane";
+import { type AgentRow, TodoPane } from "@/components/todo-pane";
 import { TodoPrompt } from "@/components/todo-prompt";
 import { Toolbar } from "@/components/toolbar";
 import { VideoPane } from "@/components/video-pane";
@@ -121,6 +121,7 @@ import { newId, parseTodo, type TodoState } from "@/lib/todo";
 import {
   addSubtaskInVault,
   addTodoInVault,
+  agentTodoIn,
   blockTodoInVault,
   cycleTodoAside,
   cycleTodoInVault,
@@ -519,7 +520,14 @@ function Home() {
   const [helpOpen, setHelpOpen] = useState(false);
   // The editor the palette opened over, held so its edits and inserts have a
   // buffer to write into. null inside means it opened over a pane with none.
-  const [palette, setPalette] = useState<{ view: EditorView | null } | null>(null);
+  // `row` is the todo pane's cursor row where it opened over that pane, taken
+  // then, so the entry acts on the row the reader was looking at.
+  const [palette, setPalette] = useState<{
+    view: EditorView | null;
+    row: AgentRow | null;
+  } | null>(null);
+  // The focused todo pane's cursor row, which only that pane writes.
+  const todoRow = useRef<AgentRow | null>(null);
   // What the prompt is doing and where it starts, and null while it is closed.
   // One piece of state for both, because a create opening on the vault root
   // starts at "" and that still has to read as open.
@@ -1680,6 +1688,101 @@ function Home() {
   );
 
   /**
+   * Hand one todo to the agent worker, or take it back, from the pane's `@`.
+   *
+   * In the note's queue with `m`'s guards, asked before and again inside the
+   * write, for `m`'s reasons: the press was made in the pane, not in the note,
+   * and an editor holding it would save its own copy over the tag. The rule
+   * reads the note as the write finds it, so a second press before the list
+   * redraws sees the first's tag and takes it off again: it goes by the line
+   * the first wrote, kept in `agentLines`, because the row still shows the
+   * words from before.
+   */
+  const agentLines = useRef(new Map<string, { listing: number; line: string }>());
+  const agentTodo = useCallback(
+    async (hit: SearchHit, twins?: number[]) => {
+      setNotice(undefined);
+      const note = hit.path;
+      // The pane's listing the row was drawn from, by when it arrived: a line
+      // kept from a press on an older listing says nothing about a row of this.
+      const listing = queryClient.getQueryState(["todos", archive])?.dataUpdatedAt ?? 0;
+      const row = `${note}\n${hit.line}\n${hit.text}`;
+      const busy = (): string | null => {
+        if (heldText(note) !== undefined) return `${note} holds text not yet saved`;
+        const focused = focusedNote.current;
+        if (focused.path === note) return `${note} is open to type in`;
+        if (focused.isWriting(note)) return `${note} is still being saved`;
+        return null;
+      };
+      const before = busy();
+      if (before !== null) {
+        setNotice(`Nothing moved: ${before}`);
+        return;
+      }
+
+      let why = nothingMoved(undefined);
+      const today = readClock(new Date()).date;
+      const tagged = await write(note, async () => {
+        const now = busy();
+        if (now !== null) {
+          why = `Nothing moved: ${now}`;
+          return false;
+        }
+        // Read here, behind the press before it in the queue, which is what
+        // puts the line it wrote in the map. Replaced only once this press
+        // lands, so one refused leaves it for the next.
+        const kept = agentLines.current.get(row);
+        const mine = kept?.listing === listing;
+        // The words the note now holds for this row, so `rowLine` finds it
+        // exactly. The twins were counted on the listed words, not these.
+        const pressing = mine ? { ...hit, text: kept.line } : hit;
+        let line = "";
+        const written = await updateNote(note, (text) => {
+          const again = busy();
+          if (again !== null) {
+            why = `Nothing moved: ${again}`;
+            return null;
+          }
+          // The kept line names this todo only while no other line says the
+          // same: a write since may have shifted a twin onto its number.
+          if (mine && text.split("\n").filter((each) => each === kept.line).length !== 1) {
+            why = "Nothing moved: that line has changed since it was listed";
+            return null;
+          }
+          const pressed = agentTodoIn(text, pressing, today, mine ? undefined : twins);
+          if ("why" in pressed) {
+            why = `Nothing moved: ${pressed.why}`;
+            return null;
+          }
+          line = pressed.line;
+          return pressed.text;
+        }).then(
+          (landed) => landed,
+          // A 500, the network, or refused over its base three times.
+          (error: unknown) => {
+            why = nothingMoved(error);
+            return null;
+          },
+        );
+        if (written === null) return false;
+        queryClient.setQueryData(["note", note], written.content);
+        // Lines kept from an older listing go: no row drawn now carries them.
+        for (const [key, each] of agentLines.current) {
+          if (each.listing !== listing) agentLines.current.delete(key);
+        }
+        agentLines.current.set(row, { listing, line });
+        return true;
+      });
+      if (!tagged) {
+        setNotice(why);
+        return;
+      }
+      todosWritten();
+    },
+    [queryClient, write, todosWritten, archive],
+  );
+
+  /**
    * Put a typed todo under `## TODOs` in today's note, from the pane's `a`, or
    * beside the row `s` opened on as a part of it.
    *
@@ -2141,9 +2244,8 @@ function Home() {
       showHelp: () => setHelpOpen(true),
       openPalette: () => {
         const focused = document.activeElement;
-        setPalette({
-          view: focused instanceof HTMLElement ? EditorView.findFromDOM(focused) : null,
-        });
+        const view = focused instanceof HTMLElement ? EditorView.findFromDOM(focused) : null;
+        setPalette({ view, row: view === null ? todoRow.current : null });
       },
       // No `saveFirst`: this opens nothing and moves no path, it only changes
       // what four lookups answer with.
@@ -2462,10 +2564,23 @@ function Home() {
   // The palette's rows, built only while it is open. One array per open,
   // because the palette ranks its rows again whenever `entries` arrives new and
   // an event renders the route under it (#592).
-  const entries = useMemo(
-    () => (palette === null ? null : paletteEntries(commands, palette.view)),
-    [commands, palette],
-  );
+  const entries = useMemo(() => {
+    if (palette === null) return null;
+    const listed = paletteEntries(commands, palette.view);
+    const row = palette.row;
+    if (row === null) return listed;
+    // The pane's `@`, which is no leader key and so in no list above: named
+    // here so the palette finds it by name and teaches the key, as it does the
+    // rest. Only over the todo pane, the one place there is a row to act on.
+    return [
+      ...listed,
+      {
+        label: "Send the todo under the cursor to the agent, or take it back",
+        keys: "@",
+        run: () => void agentTodo(row.hit, row.twins),
+      },
+    ];
+  }, [commands, palette, agentTodo]);
 
   /**
    * Read the open note off the vault again and answer with its text, `:e`.
@@ -2605,6 +2720,8 @@ function Home() {
                     onEdit={editTodo}
                     onBlock={blockTodo}
                     onTimer={toggleTimer}
+                    onAgent={(hit, twins) => void agentTodo(hit, twins)}
+                    cursorRow={focused ? todoRow : undefined}
                     onRefile={(hit, project) => void refileTodo(hit, project)}
                     onNotice={setNotice}
                     archive={archive}

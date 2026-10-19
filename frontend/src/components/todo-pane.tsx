@@ -228,6 +228,12 @@ const CURSOR = [
   "focus:outline-2 focus:outline-one-cursor focus:bg-one-cursor/15",
 ].join(" ");
 
+/** The row the pane's `@` acts on, with its twins where it has any. */
+export interface AgentRow {
+  hit: SearchHit;
+  twins?: number[];
+}
+
 interface TodoPaneProps {
   /** Reached by a leader sequence typed here, so every leader key still works. */
   commands: EditorCommands;
@@ -281,6 +287,22 @@ interface TodoPaneProps {
    */
   onTimer: (hit: SearchHit, twins?: number[]) => void;
   /**
+   * Tag the row's todo `#agent` for the worker, or take the tag back off.
+   *
+   * The hit for the reason `onCycle` takes one: the write reads the note off
+   * disk again, and the path and the line are how it finds the task line.
+   */
+  onAgent: (hit: SearchHit, twins?: number[]) => void;
+  /**
+   * Where this pane puts the row `@` would act on, or null where `@` would do
+   * nothing, for the palette's entry of that key to read as it opens.
+   *
+   * A ref and not a callback, so a move of the cursor renders nothing else.
+   * The route hands it only to the focused pane, which is the one the palette
+   * opens over.
+   */
+  cursorRow?: { current: AgentRow | null };
+  /**
    * Move the row's todo, with its parts, into its project's note.
    *
    * The `TodoHit` rather than a bare hit, because the project it moves to is
@@ -331,6 +353,8 @@ export function TodoPane({
   onEdit,
   onBlock,
   onTimer: timer,
+  onAgent: agent,
+  cursorRow,
   onRefile,
   onNotice,
   focusSignal,
@@ -407,8 +431,8 @@ export function TodoPane({
 
   const { data } = useQuery({ queryKey: ["todos", archive], queryFn: () => fetchTodos(archive) });
 
-  // Every press in here that writes a state or a timer, key, tap or drop on
-  // the board, goes through these two, so none of them leaves the twins off.
+  // Every press in here that writes a state, a timer or the agent's tag, key,
+  // tap or drop on the board, goes through these, so none leaves the twins off.
   // Only where there are twins: one line or none is the row's own, and the
   // press goes out with the arguments it was made with.
   const onCycle = (...args: [hit: SearchHit, state?: TodoState]) => {
@@ -420,6 +444,11 @@ export function TodoPane({
     const twins = twinsOf(data ?? [], hit);
     if (twins.length > 1) timer(hit, twins);
     else timer(hit);
+  };
+  const onAgent = (hit: SearchHit) => {
+    const twins = twinsOf(data ?? [], hit);
+    if (twins.length > 1) agent(hit, twins);
+    else agent(hit);
   };
 
   // The listing is already in the cache, put there by the route, so this asks
@@ -686,6 +715,22 @@ export function TodoPane({
   const at = rows[cursor];
   const cursorKey = at === undefined ? "" : rowKey(at.hit);
 
+  // After every render, as `@` reads `at` at the press: none on the board,
+  // which drops the key, or in the picker, which takes only its own.
+  useEffect(() => {
+    if (cursorRow === undefined) return;
+    if (board || picking !== null || at === undefined) {
+      cursorRow.current = null;
+    } else {
+      const twins = twinsOf(data ?? [], at.hit);
+      cursorRow.current = { hit: at.hit, twins: twins.length > 1 ? twins : undefined };
+    }
+    // A pane that loses the focus, or closes, leaves no row behind it.
+    return () => {
+      cursorRow.current = null;
+    };
+  });
+
   const blocked = shown.filter(({ todo }) => todo.state === "blocked").length;
   const onSomebody = shown.filter(({ todo }) => todo.state === "waiting").length;
   const toReview = shown.filter(({ todo }) => todo.state === "review").length;
@@ -924,6 +969,11 @@ export function TodoPane({
       // whether the vault holds an open one, which only the write can see.
       case "t":
         if (at !== undefined) onTimer(at.hit);
+        break;
+      // `#agent` without typing it, the tag the worker picks todos up by. The
+      // write decides add or take off, from the line as the note holds it.
+      case "@":
+        if (at !== undefined) onAgent(at.hit);
         break;
       // One todo per press, so no bulk move ever happens.
       case "m":
@@ -1335,6 +1385,7 @@ export function TodoPane({
                     ["edit", () => edit(hit)],
                     ["blocked by", () => block(hit)],
                     ["refile", () => onRefile(hit)],
+                    ["agent", () => onAgent(hit)],
                   ];
                   return (
                     <div key={key}>
@@ -1447,9 +1498,9 @@ export function TodoPane({
         ) : (
           <span>
             x cycle&ensp;&ensp;O P V X B W R state&ensp;&ensp;a add&ensp;&ensp;s part&ensp;&ensp;i
-            edit&ensp;&ensp;b blocked by&ensp;&ensp;t timer&ensp;&ensp;m refile&ensp;&ensp;d
-            done&ensp;&ensp;n next&ensp;&ensp;v view&ensp;&ensp;c board&ensp;&ensp;/
-            filter&ensp;&ensp;q close&ensp;&ensp;Escape editor
+            edit&ensp;&ensp;b blocked by&ensp;&ensp;t timer&ensp;&ensp;m refile&ensp;&ensp;@
+            agent&ensp;&ensp;d done&ensp;&ensp;n next&ensp;&ensp;v view&ensp;&ensp;c
+            board&ensp;&ensp;/ filter&ensp;&ensp;q close&ensp;&ensp;Escape editor
           </span>
         )}
       </footer>
