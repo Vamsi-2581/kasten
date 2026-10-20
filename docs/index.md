@@ -9,8 +9,8 @@ the way [Diátaxis](https://diataxis.fr) splits them, and the files follow the
 [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 v0.2, so an agent can walk this directory without being told how.
 
-Each page carries a `type` in its frontmatter, and that type is the Diátaxis
-quadrant: `Tutorial`, `How-to Guide`, `Reference` or `Explanation`. Read the
+Each page except the day pages under `log/` carries a `type` in its
+frontmatter, and that type is the Diátaxis quadrant: `Tutorial`, `How-to Guide`, `Reference` or `Explanation`. Read the
 quadrant that fits what you are doing. Learning comes first, doing comes
 second, looking things up comes third, understanding comes last.
 
@@ -25,4 +25,4 @@ second, looking things up comes third, understanding comes last.
 
 * [README](../README.md): what kasten is, in a paragraph
 * [deploy/](../deploy/README.md): the self-host stack, walked through in [Self-host on a server](/tutorials/self-host-on-a-server.md), and the maintainer's prod compose file, with its runbook in [Deploy to the VPS](/how-to/deploy-to-the-vps.md)
-* [log.md](/log.md): what changed in this bundle, by date
+* [log.md](/log.md): the index of the change log, one page per day under `log/`
