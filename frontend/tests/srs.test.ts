@@ -1323,3 +1323,18 @@ describe("#664 a code block holds no card and no deck tag", () => {
     expect(fronts(text)).toEqual(["r"]);
   });
 });
+
+describe("#670 a code block is part of a ? card's side, as obsidian-spaced-repetition reads it", () => {
+  it("#670 a ? card's back holding a fence keeps the fence, the prose under it and its schedule", () => {
+    const text =
+      "#flashcards/a\n\nq\n?\nprose\n```\ncode\n```\nmore prose\n<!--SR:!2026-08-20,3,250-->\n";
+
+    expect(parseCards(text).map(({ to, back, held }) => ({ to, back, held }))).toEqual([
+      {
+        to: 9,
+        back: "prose\n```\ncode\n```\nmore prose",
+        held: { due: "2026-08-20", interval: 3, ease: 250 },
+      },
+    ]);
+  });
+});
