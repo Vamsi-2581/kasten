@@ -19,20 +19,55 @@ import { NARROW } from "@/lib/use-viewport";
  */
 let touched = window.matchMedia("(pointer: coarse)").matches;
 
+// The keys down now, and the work waiting for them to come up. See
+// `whenKeysUp`. A set rather than a flag, because a second key can go down
+// while the first is still held, and the first to come up must not free the
+// work while the second is still down.
+const held = new Set<string>();
+const waiting: (() => void)[] = [];
+
+function keyOf(event: KeyboardEvent): string {
+  return event.code || event.key;
+}
+
+function runWaiting(): void {
+  if (held.size > 0) return;
+  for (const run of waiting.splice(0)) run();
+}
+
 window.addEventListener(
   "pointerdown",
   (event) => {
     touched = event.pointerType === "touch";
+    held.clear();
+    runWaiting();
   },
   true,
 );
 window.addEventListener(
   "keydown",
-  () => {
+  (event) => {
     touched = false;
+    held.add(keyOf(event));
   },
   true,
 );
+window.addEventListener(
+  "keyup",
+  (event) => {
+    // macOS sends no keyup for a key pressed with Cmd down, so letting Cmd go
+    // is the only sign that those keys are up.
+    if (event.key === "Meta") held.clear();
+    held.delete(keyOf(event));
+    runWaiting();
+  },
+  true,
+);
+// A key let go while the window was away sends no keyup to this page.
+window.addEventListener("blur", () => {
+  held.clear();
+  runWaiting();
+});
 
 /**
  * Whether handing an editor the focus now would raise a keyboard nobody asked for.
@@ -46,4 +81,17 @@ window.addEventListener(
  */
 export function keyboardUnasked(): boolean {
   return touched && window.matchMedia(NARROW).matches;
+}
+
+/**
+ * Runs `run` once no key is down: now when none is, else when the last held key comes up.
+ *
+ * A file picker opened inside a keydown starts while that key is still down.
+ * The browser hides the pointer while someone types, so the picker opens with
+ * no pointer to pick with. The keyup still sits inside the browser's transient
+ * activation window, so the picker still opens from there (#692).
+ */
+export function whenKeysUp(run: () => void): void {
+  if (held.size > 0) waiting.push(run);
+  else run();
 }

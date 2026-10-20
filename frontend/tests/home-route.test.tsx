@@ -420,8 +420,10 @@ async function renderApp(entry = "/") {
     press,
     /** A leader key, which is space and then the keys after it, in order. */
     leader: (...keys: string[]) => {
-      press(" ");
-      for (const key of keys) press(key);
+      for (const key of [" ", ...keys]) {
+        press(key);
+        fireEvent.keyUp(editor(), { key });
+      }
     },
     /**
      * Run an ex command, the way a reader types one.
@@ -6133,6 +6135,19 @@ describe("importing markdown and taking it out again", () => {
     expect(order).toEqual(["blank", "click"]);
   });
 
+  it("opens the markdown picker once the key that asked for it is up", async () => {
+    const app = await renderApp();
+    await settle();
+    const click = vi.spyOn(app.notePicker(), "click").mockImplementation(() => {});
+
+    app.leader("c");
+    app.press("m");
+
+    expect(click).not.toHaveBeenCalled();
+    fireEvent.keyUp(document.querySelector(".cm-content") as HTMLElement, { key: "m" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps each file's own name and puts them all in the inbox", async () => {
     const app = await renderApp();
     await settle();
@@ -6311,6 +6326,77 @@ describe("putting a book in the vault", () => {
     app.leader("c", "b");
 
     expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the book picker once the key that asked for it is up", async () => {
+    const app = await renderApp();
+    await settle();
+    const click = vi.spyOn(app.picker(), "click").mockImplementation(() => {});
+
+    app.leader("c");
+    app.press("b");
+
+    // Still down: a picker opened now starts while the pointer is hidden.
+    expect(click).not.toHaveBeenCalled();
+    fireEvent.keyUp(document.querySelector(".cm-content") as HTMLElement, { key: "b" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for every held key before it opens the book picker", async () => {
+    const app = await renderApp();
+    await settle();
+    const click = vi.spyOn(app.picker(), "click").mockImplementation(() => {});
+    const editorEl = document.querySelector(".cm-content") as HTMLElement;
+
+    app.leader();
+    app.press("c");
+    app.press("b");
+    // `b` is still down when `c` comes up, so the picker must wait for it too.
+    fireEvent.keyUp(editorEl, { key: "c" });
+    expect(click).not.toHaveBeenCalled();
+
+    fireEvent.keyUp(editorEl, { key: "b" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the book picker after a Cmd chord whose key sent no keyup", async () => {
+    const app = await renderApp();
+    await settle();
+    const click = vi.spyOn(app.picker(), "click").mockImplementation(() => {});
+    const editorEl = document.querySelector(".cm-content") as HTMLElement;
+
+    // macOS sends no keyup for `s` while Cmd is down, only for Cmd itself.
+    fireEvent.keyDown(editorEl, { key: "Meta", code: "MetaLeft", metaKey: true });
+    fireEvent.keyDown(editorEl, { key: "s", code: "KeyS", metaKey: true });
+    fireEvent.keyUp(editorEl, { key: "Meta", code: "MetaLeft" });
+    app.leader("c");
+    app.press("b", { code: "KeyB" });
+
+    expect(click).not.toHaveBeenCalled();
+    fireEvent.keyUp(editorEl, { key: "b", code: "KeyB" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("with vim off, opens the book picker from the tree once the key is up", async () => {
+    localStorage.setItem("kasten.vim", "off");
+    try {
+      const app = await renderApp();
+      await settle();
+      const click = vi.spyOn(app.picker(), "click").mockImplementation(() => {});
+      const tree = app.tree();
+
+      fireEvent.keyDown(tree, { key: " " });
+      fireEvent.keyUp(tree, { key: " " });
+      fireEvent.keyDown(tree, { key: "c" });
+      fireEvent.keyUp(tree, { key: "c" });
+      fireEvent.keyDown(tree, { key: "b" });
+
+      expect(click).not.toHaveBeenCalled();
+      fireEvent.keyUp(tree, { key: "b" });
+      expect(click).toHaveBeenCalledTimes(1);
+    } finally {
+      localStorage.removeItem("kasten.vim");
+    }
   });
 
   it("keeps the file's own name and puts the pair in the inbox", async () => {
