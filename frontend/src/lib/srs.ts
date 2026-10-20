@@ -315,6 +315,8 @@ interface Read {
   uncommented: string;
   /** Per line of the note, whether it is code, fence lines included. */
   code: boolean[];
+  /** Per line of the note, whether it lies in a fence nobody closed. */
+  unclosed: boolean[];
 }
 
 /**
@@ -335,11 +337,14 @@ interface Read {
 function read(text: string): Read {
   let uncommented = "";
   let at = 0;
-  const spans: [number, number][] = [];
+  const spans: [number, number, boolean][] = [];
   notes.parse(text).iterate({
     enter(node) {
       if (node.name === "FencedCode" || node.name === "CodeBlock") {
-        spans.push([node.from, node.to]);
+        // A closed fence has a CodeMark at each end, one nobody closed only the
+        // opening one, and an indented block none.
+        const unclosed = node.name === "FencedCode" && node.node.getChildren("CodeMark").length < 2;
+        spans.push([node.from, node.to, unclosed]);
         // Nothing inside code is a comment, whatever language the fence names.
         return false;
       }
@@ -356,16 +361,19 @@ function read(text: string): Read {
   // A line is code where a span overlaps it. Overlap and not the line of
   // `to`, as a block may end before its last newline or after it.
   const code: boolean[] = [];
+  const unclosed: boolean[] = [];
   let start = 0;
   let next = 0;
   for (const line of text.split("\n")) {
     const end = start + line.length;
     while ((spans[next]?.[1] ?? Infinity) <= start) next++;
-    const [from, to] = spans[next] ?? [Infinity, Infinity];
-    code.push(from <= end && start < to);
+    const [from, to, open] = spans[next] ?? [Infinity, Infinity, false];
+    const inside = from <= end && start < to;
+    code.push(inside);
+    unclosed.push(inside && open);
     start = end + 1;
   }
-  return { uncommented, code };
+  return { uncommented, code, unclosed };
 }
 
 /**
@@ -377,35 +385,42 @@ function read(text: string): Read {
  */
 export function parseCards(text: string, note = ""): Card[] {
   const lines = text.split("\n");
-  const { uncommented, code } = read(text);
+  const { uncommented, code, unclosed } = read(text);
   const taken = lines.map(() => false);
   const cards: Card[] = [];
   /** The decks each card names at its own head, in the order they are pushed. */
   const owned: string[][] = [];
   /** Lines whose tags a card took, which are therefore not the note's. */
   const claimed = new Set<number>();
+  // obsidian-spaced-repetition reads a fence whole, so a blank line, a heading
+  // or tags inside code is the fence's and ends no card (#675). Not in a fence
+  // nobody closed, which runs to the end of the note: there the card above it
+  // would read the schedule of a card hidden under it and a rating overwrite it (#680).
+  const ends = (at: number) => (!code[at] || unclosed[at]) && breaks(lines[at]);
+  // A schedule ends a card in code too: it is the card's last line, so neither
+  // walk crosses one into the card above or a second line under it.
+  const schedules = (at: number) => SR.test(lines[at] ?? "") || CLOZE_SR.test(lines[at] ?? "");
 
   for (const [at, line] of lines.entries()) {
     if (code[at] || line.trim() !== "?") continue;
 
-    // The front runs back to the blank line or heading above it. A `?` with
-    // nothing over it is a line of prose, not a card missing its question.
+    // The front runs back to the blank line or heading above it, outside code.
+    // A `?` with nothing over it is a line of prose, not a card missing its question.
     // A line holding a mark ends it too: directly over the `?` it is the whole
     // front, the cloze this card asks, and further up it is a cloze of its own,
     // which is the one reading `review.ts` can make off the matched lines.
-    const cloze = !breaks(lines[at - 1]) && holdsCloze(lines[at - 1]);
+    const cloze = !ends(at - 1) && holdsCloze(lines[at - 1]);
     let from = cloze ? at - 1 : at;
-    if (!cloze) while (!breaks(lines[from - 1]) && !holdsCloze(lines[from - 1])) from--;
+    if (!cloze) {
+      while (!ends(from - 1) && !holdsCloze(lines[from - 1]) && !schedules(from - 1)) from--;
+    }
     if (from === at) continue;
 
+    // The back runs down the same way. The token ends it in code too, as the
+    // schedule does, so a fence nobody closed keeps its one schedule and the
+    // token `setSuspended` writes there still parks the card.
     let to = at;
-    while (
-      !breaks(lines[to + 1]) &&
-      !SR.test(lines[to + 1] ?? "") &&
-      !CLOZE_SR.test(lines[to + 1] ?? "")
-    ) {
-      to++;
-    }
+    while (!ends(to + 1) && !schedules(to + 1) && !parks(lines[to + 1])) to++;
     // A `?` with nothing under it is no card, except under a cloze, whose `?`
     // it stays with an empty back. `review.ts` sees the matched lines alone and
     // cannot tell a blank line under the `?` from a back of plain text, so both
