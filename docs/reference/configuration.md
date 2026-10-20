@@ -201,6 +201,39 @@ refused until you mint again.
 A store that does not exist reads as an empty list, so a box with no tokens
 refuses every bearer rather than failing to start.
 
+## KASTEN_UPLOAD_PATH
+
+The folder a file sent in pieces is joined in, until
+`POST /api/anki?upload=` or `POST /api/assets/{path}?upload=` reads it. See
+[`POST /api/uploads`](/reference/http-api.md#post-apiuploads).
+
+| | |
+| --- | --- |
+| Default | `kasten-uploads` in the system's temp folder, `/tmp/kasten-uploads` |
+| Read by | `POST /api/uploads`, and startup |
+
+Outside the vault, so a half-sent file never reaches the file tree, the
+watcher or jj; the backend refuses to start with it in the vault or inside it.
+At every start the backend deletes the files in it named like an upload, 32
+hex digits, and leaves anything else: what has arrived is held in memory, and
+a restart forgets it. It needs room for 4GiB, what the uploads open at once
+may declare between them, and the asset finish copies the joined file into the
+vault rather than moving it, because the two sit on different filesystems in
+the container.
+
+## KASTEN_UPLOAD_SWEEP_SECONDS
+
+How often the backend deletes uploads idle for over an hour.
+
+| | |
+| --- | --- |
+| Default | `600` |
+| Read by | startup |
+
+It must be over 0, or the backend refuses to start. There for the tests,
+which set a nanosecond to sweep on every turn of the event loop rather than
+wait ten minutes. Production leaves it alone.
+
 ## KASTEN_AGENT_HOST
 
 The `Host` header the MCP endpoint answers to, and the OAuth issuer.
