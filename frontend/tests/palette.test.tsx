@@ -4,13 +4,21 @@ import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { vim } from "@replit/codemirror-vim";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { CommandPalette } from "@/components/command-palette";
 import { readClock } from "@/lib/clock";
 import { editorCommands } from "@/lib/editor-commands";
+import { logCard } from "@/lib/log-card";
 import { INSERTS, paletteEntries, slashCompletions, writeInsert } from "@/lib/palette";
 import { periodicNote } from "@/lib/periodic";
 import { notePath, todoCycled } from "@/lib/todo-commands";
 import { stubCommands } from "./stub-commands";
+
+vi.mock("@/lib/food-api", () => ({
+  searchFood: vi.fn(),
+  readBarcode: vi.fn(),
+  fetchLog: vi.fn(async () => []),
+}));
 
 function viewOf(doc: string, cursor = doc.length) {
   return new EditorView({ state: EditorState.create({ doc, selection: { anchor: cursor } }) });
@@ -254,4 +262,42 @@ describe("the drink entries", () => {
     expect(commands.logDrink).toHaveBeenCalledWith("coffee");
     expect(view.state.doc.toString()).toBe("x");
   });
+});
+
+it("#621 the palette's Log food opens the food search on a daily note", () => {
+  const view = new EditorView({
+    state: EditorState.create({
+      doc: "# 2026-10-20 Tuesday\n\n## Log\n- 💧 500 ml",
+      extensions: [notePath.of(periodicNote("daily", new Date()).path), logCard],
+    }),
+  });
+  const entry = paletteEntries(stubCommands(), view).find((row) => row.label === "Log food");
+  expect(entry).not.toBeUndefined();
+  entry?.run();
+  expect(view.dom.querySelector(".cm-log-food-query")).not.toBeNull();
+});
+
+/** The palette as the app mounts it: it is taken away once a command is run from it. */
+function PaletteHost({ entries }: { entries: ReturnType<typeof paletteEntries> }) {
+  const [open, setOpen] = useState(true);
+  return open ? <CommandPalette entries={entries} onClose={() => setOpen(false)} /> : null;
+}
+
+it("#621 Log food from the palette leaves the focus in the food query", async () => {
+  const view = new EditorView({
+    state: EditorState.create({
+      doc: "# 2026-10-20 Tuesday\n\n## Log\n- 💧 500 ml",
+      extensions: [notePath.of(periodicNote("daily", new Date()).path), logCard],
+    }),
+    parent: document.body.appendChild(document.createElement("div")),
+  });
+  // The editor holds the focus when the palette opens, so the palette hands it back there.
+  view.contentDOM.focus();
+  render(<PaletteHost entries={paletteEntries(stubCommands(), view)} />);
+  const option = screen.queryByRole("option", { name: /Log food/ });
+  expect(option).not.toBeNull();
+  fireEvent.click(option as HTMLElement);
+  await Promise.resolve();
+  expect(document.activeElement).toBe(view.dom.querySelector(".cm-log-food-query"));
+  view.destroy();
 });
