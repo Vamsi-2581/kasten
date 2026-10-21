@@ -118,10 +118,25 @@ describe("the safe area on a phone", () => {
     await device(PORTRAIT.width, PORTRAIT.height, PORTRAIT.insets);
     await mount(<Frame phone={true} />);
 
-    expect(document.querySelectorAll('[role="toolbar"] button').length).toBe(8);
+    expect(document.querySelectorAll('[role="toolbar"] button').length).toBe(9);
     expect(outside(bars(), PORTRAIT.insets)).toEqual([]);
     const toolbar = document.querySelector('[role="toolbar"]') as HTMLElement;
     expect(getComputedStyle(toolbar).paddingBottom).toBe("34px");
+  });
+
+  it("#624 with a split at 360 every toolbar button is on screen and 44px", async () => {
+    await device(360, 800, NONE);
+    await mount(<Frame phone={true} />);
+
+    const buttons = [...document.querySelectorAll<HTMLElement>('[role="toolbar"] button')];
+    expect(buttons).toHaveLength(9);
+    expect(outside(buttons, NONE)).toEqual([]);
+    for (const button of buttons) {
+      const rect = button.getBoundingClientRect();
+      const name = button.getAttribute("aria-label") ?? undefined;
+      expect(rect.width, name).toBeGreaterThanOrEqual(44);
+      expect(rect.height, name).toBeGreaterThanOrEqual(44);
+    }
   });
 
   it("landscape: the frame pads by the side insets and the bar at the foot by the bottom one", async () => {
