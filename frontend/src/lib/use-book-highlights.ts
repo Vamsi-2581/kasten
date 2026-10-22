@@ -7,6 +7,7 @@ import { fetchNote } from "@/lib/api";
 import { findQuotes } from "@/lib/find-quote";
 import { type FoliateOverlayer, type FoliateView, pdfLayer } from "@/lib/foliate-view";
 import { type HighlightBlock, highlightBlocks } from "@/lib/highlight";
+import { onThemeChange } from "@/lib/theme";
 
 /**
  * Throw away every text layer on a pdf page but the newest.
@@ -190,9 +191,9 @@ export function useBookHighlights(
       drawn.current = [];
 
       // Read the way `pageStyles` reads the palette, so the book, the app and the
-      // highlight stay one set of colours in `app.css`.
+      // highlight stay one set of colours in `kasten-theme.css`.
       const colour = getComputedStyle(document.documentElement)
-        .getPropertyValue("--color-one-accent")
+        .getPropertyValue("--k-accent")
         .trim();
 
       for (const entry of shown) {
@@ -228,6 +229,9 @@ export function useBookHighlights(
   }, [blocks, redraw]);
 
   const repaint = useCallback(() => redraw(blocksRef.current), [redraw]);
+
+  // A highlight takes the accent when it is drawn, so a switch draws them again.
+  useEffect(() => onThemeChange(repaint), [repaint]);
 
   /**
    * Watch a pdf page's text layer, which is the only word anyone gets that it
