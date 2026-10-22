@@ -16,7 +16,13 @@ import {
   StateField,
   type Text,
 } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemirror/view";
+import {
+  Decoration,
+  type DecorationSet,
+  EditorView,
+  ViewPlugin,
+  WidgetType,
+} from "@codemirror/view";
 import { fetchNote, NoteMissing } from "@/lib/api";
 import { foodPanel } from "@/lib/food-search";
 import { LOG_NOTE } from "@/lib/layout";
@@ -55,15 +61,22 @@ const configArrived = StateEffect.define<LogConfig>();
 /** Each view's config, fetched once, so a card drawn again does not ask the note again. */
 const configs = new WeakMap<EditorView, Promise<LogConfig>>();
 
+/** The config in log.md. A note that is not there is the default config; any other failure rejects. */
+function readConfig(): Promise<LogConfig> {
+  return fetchNote(LOG_NOTE).then(parseConfig, (error: unknown) => {
+    if (error instanceof NoteMissing) return parseConfig(null);
+    throw error;
+  });
+}
+
 /**
- * The view's config from the log note. A note that is not there is the default
- * config, and one that fails to load is named in the console and the default too.
+ * The view's config from the log note. One that fails to load is named in the
+ * console and the default config is the answer.
  */
 function configFor(view: EditorView): Promise<LogConfig> {
   let config = configs.get(view);
   if (config === undefined) {
-    config = fetchNote(LOG_NOTE).then(parseConfig, (error: unknown) => {
-      if (error instanceof NoteMissing) return parseConfig(null);
+    config = readConfig().catch((error: unknown) => {
       if (!(error instanceof Error)) throw error;
       console.warn(error.message);
       return parseConfig(null);
@@ -369,20 +382,26 @@ class LogCard extends WidgetType {
       // Gone from the page means the note was closed while the fetch was out, and there is nothing to draw into.
       // A drawn card moves the open food panel, so the focus in it is given back as for a tap.
       configFor(view).then((arrived) => {
-        if (!card.isConnected) return;
-        // A redraw makes a new amount field, so the typed text and the focus are carried over.
-        const field = view.dom.querySelector<HTMLInputElement>(".cm-log-amount");
-        const typed = field?.value ?? "";
-        const focused = field !== null && document.activeElement === field;
-        keepPanelFocus(view, () => view.dispatch({ effects: configArrived.of(arrived) }));
-        const next = view.dom.querySelector<HTMLInputElement>(".cm-log-amount");
-        if (next !== null) {
-          next.value = typed;
-          if (focused) next.focus({ preventScroll: true });
-        }
+        if (card.isConnected) applyConfig(view, arrived);
       });
     }
     return card;
+  }
+}
+
+/**
+ * Draws the config in the view's card. A redraw makes a new amount field, so the
+ * typed text and the focus are carried over.
+ */
+function applyConfig(view: EditorView, config: LogConfig): void {
+  const field = view.dom.querySelector<HTMLInputElement>(".cm-log-amount");
+  const typed = field?.value ?? "";
+  const focused = field !== null && document.activeElement === field;
+  keepPanelFocus(view, () => view.dispatch({ effects: configArrived.of(config) }));
+  const next = view.dom.querySelector<HTMLInputElement>(".cm-log-amount");
+  if (next !== null) {
+    next.value = typed;
+    if (focused) next.focus({ preventScroll: true });
   }
 }
 
@@ -460,7 +479,44 @@ const cardField = StateField.define<Card>({
   provide: (field) => EditorView.decorations.from(field, (value) => value.decorations),
 });
 
-export const logCard: Extension = cardField;
+/** The views showing a card. A WeakMap cannot be walked, and a change to log.md has to reach each one. */
+const views = new Set<EditorView>();
+
+const registry = ViewPlugin.define((view) => {
+  views.add(view);
+  return {
+    destroy: () => {
+      views.delete(view);
+    },
+  };
+});
+
+export const logCard: Extension = [cardField, registry];
+
+/**
+ * Asks log.md again for each card whose config has arrived, and draws what it holds
+ * now. A stream that was down misses a write or removal of log.md, and a card would
+ * keep the kinds it had. A card whose config is still on its way is left alone: its
+ * fetch asked the log when the card was drawn, and asking again would cost a second.
+ */
+export function reloadLogConfig(): void {
+  for (const view of views) {
+    if (view.state.field(cardField).config === null) continue;
+    const reading = readConfig();
+    // The newest read holds the view's slot, so an older answer that lands last is dropped.
+    configs.set(view, reading);
+    reading.then(
+      (arrived) => {
+        if (views.has(view) && configs.get(view) === reading) applyConfig(view, arrived);
+      },
+      (error: unknown) => {
+        // A failed read keeps the kinds the card has. Its slot is dropped, so the next draw asks again.
+        if (configs.get(view) === reading) configs.delete(view);
+        if (error instanceof Error) console.warn(error.message);
+      },
+    );
+  }
+}
 
 /** Whether the view shows a card, which only a daily note with one does. */
 export function cardShown(view: EditorView): boolean {
