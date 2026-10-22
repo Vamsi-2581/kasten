@@ -108,10 +108,18 @@ where grey meta text sits inside a mark; the test names it as the exception.
 | `--k-mono` | JetBrains Mono, then ui-monospace |
 | `--k-text-12` … `--k-text-64` | 12, 13, 15, 19 (reading), 23, 27, 36, 46, 64 px |
 | `--k-leading-heading`, `--k-leading-ui`, `--k-leading-reading` | 1.1, 1.5, 1.6 |
+| `--k-leading-display`, `--k-track-display` | 1.04, -0.018 em (the 46 and 64 px sizes) |
 | `--k-track-title`, `--k-track-heading`, `--k-track-body`, `--k-track-label`, `--k-track-kbd` | -0.017, -0.016, 0, +0.006, +0.02 em |
 | `--k-space-4` … `--k-space-64` | 4, 8, 12, 16, 24, 32, 48, 64 px |
 | `--k-radius-4`, `--k-radius-6`, `--k-radius-8` | 4, 6, 8 px |
 | `--k-measure` | 680 px |
+
+Each size also has a class, `text-k-12` to `text-k-64`, which carries its own
+leading and tracking, so a component names one class. The 46 and 64 px sizes
+take the display pair, the 36 and 27 px sizes the title pair, the 23 px size the
+heading pair, the 19 px size the reading leading, the 15 px size the UI leading
+and body tracking, and the 12 and 13 px sizes the UI leading and label
+tracking. `tracking-k-kbd` and `tracking-k-label` set the tracking alone.
 
 ## Motion
 
@@ -130,6 +138,32 @@ sheet on them.
 | `--k-spring-tab`, `--k-spring-split`, `--k-spring-card` | 0.32 s, 0.34 s, 0.26 s | Tab underline, split pane enter, card fly-off |
 | `--k-stagger`, `--k-stagger-cap` | 22 ms, 6 | List entrance, never past the sixth item |
 | `--k-theme-fade` | 240 ms | The cross-fade between light and dark |
+
+A press marks the control under the pointer with `data-pressed`, which
+`lib/press.ts` sets and clears, and `app.css` gives a marked control the press
+scale. A row with the `k-row` class tints instead, because a full-width row
+scaled down looks broken. `k-enter` brings a list's rows in one after another,
+by their `--i` index, and stops the delay at the sixth row.
+
+`k-glass` is the only see-through surface: the tab strip, drawn at 84 % of
+`--k-bg` over an 18 px blur, with one `k-hairline` under it. Sheets, panels and
+cards stay solid.
+
+One spring, `lib/spring.ts`, moves the sheet, the tab underline and a new
+split pane. It takes a response in seconds and a damping, with the angular
+frequency 2π over the response, as Apple's `Spring(response:dampingRatio:)`
+states one. A new target starts from where the spring is and how fast it moves,
+so a finger can catch anything mid-flight, and nothing waits for a spring to
+settle. It moves only `transform` and `opacity`. `lib/sheet-math.ts` holds the
+sheet's rules: 10 px before a drag starts, speed over the last 100 ms (0 after
+a 90 ms stop), a close on a flick over 400 px/s or a coast past half the
+height, and the rubber band above the top.
+
+Three media queries take the extras away. `prefers-reduced-motion` drops the
+press scale and the entrance, lands every spring at once, fades the sheet and
+a new pane instead of sliding them. `prefers-reduced-transparency` makes the glass
+solid and drops its blur. `prefers-contrast: more` does both, and draws the
+hairline in `--k-ink`.
 
 ## Light and dark
 

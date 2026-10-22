@@ -1,10 +1,12 @@
 import { EditorView } from "@codemirror/view";
 import { useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { CommandPalette } from "@/components/command-palette";
 import { FileExplorer } from "@/components/file-explorer";
+import { GraphPane } from "@/components/graph-pane";
 import { KeyHelp } from "@/components/key-help";
+import { Sheet } from "@/components/sheet";
 import { StatusBar } from "@/components/status-bar";
 import type { AgentRow } from "@/components/todo-pane";
 import { Toolbar } from "@/components/toolbar";
@@ -13,7 +15,7 @@ import { usePaneMoves } from "@/components/use-pane-moves";
 import { usePrompts } from "@/components/use-prompts";
 import { WorkspacePanes } from "@/components/workspace-panes";
 import { heldText } from "@/lib/held-text";
-import type { TreeCommands } from "@/lib/key-bindings";
+import type { EditorCommands, TreeCommands } from "@/lib/key-bindings";
 import { askLogConfig, logConfig, subscribeLogConfig } from "@/lib/log-config";
 import { DEFAULT_CONFIG } from "@/lib/log-kinds";
 import { paletteEntries } from "@/lib/palette";
@@ -177,6 +179,10 @@ function Home() {
   // rendering off stays off until you turn it back on.
   const [preview, setPreview] = useState(true);
   const [helpOpen, setHelpOpen] = useState(false);
+  // On a phone the local graph is a sheet over the window: the note it is drawn
+  // around, and whether the sheet is up. The sheet keeps the note while it goes down.
+  const [graphSheet, setGraphSheet] = useState({ note: "", open: false });
+  const openGraphSheet = useCallback((note: string) => setGraphSheet({ note, open: true }), []);
   // The editor the palette opened over, held so its edits and inserts have a
   // buffer to write into. null inside means it opened over a pane with none.
   // `row` is the todo pane's cursor row where it opened over that pane, taken
@@ -247,6 +253,7 @@ function Home() {
     setNotice,
     paths: data,
     focusedNote,
+    sheetGraph: phone ? openGraphSheet : undefined,
   });
   const { playSignal } = paneCommands;
   const files = useFileTransfer({ data, pane, saveFirst, openInPane, setNotice });
@@ -315,8 +322,32 @@ function Home() {
     ];
   }, [commands, palette, agentTodo, kinds]);
 
+  const closeGraphSheet = useCallback(
+    () => setGraphSheet((previous) => ({ ...previous, open: false })),
+    [],
+  );
+  // The graph in the sheet is drawn over the window, so each command it runs first
+  // puts the sheet away: `q` closes the sheet, and every other command acts on what
+  // the reader can see rather than on a pane beneath it.
+  const sheetCommands = useMemo<EditorCommands>(() => {
+    const wrapped: Record<string, unknown> = { closeNote: closeGraphSheet };
+    for (const [name, run] of Object.entries(commands)) {
+      if (name === "closeNote") continue;
+      wrapped[name] =
+        typeof run === "function"
+          ? (...args: unknown[]) => {
+              closeGraphSheet();
+              return (run as (...rest: unknown[]) => unknown)(...args);
+            }
+          : run;
+    }
+    return wrapped as unknown as EditorCommands;
+  }, [commands, closeGraphSheet]);
+
+  // `overflow-x: clip`, not `hidden`: a hidden overflow makes this a scroll box
+  // of its own, and the tab strip's sticky top would then scroll away with it.
   return (
-    <main ref={frame} className="safe-frame flex h-dvh flex-col bg-k-bg">
+    <main ref={frame} className="safe-frame flex h-dvh flex-col overflow-x-clip bg-k-bg">
       {/* min-h-0 lets the editor scroll instead of pushing the bar off-screen. */}
       <div className="flex min-h-0 flex-1">
         <FileExplorer
@@ -396,6 +427,19 @@ function Home() {
       />
       {phone && <Toolbar commands={commands} split={panes.length > 1} inert={narrow && treeOpen} />}
       {helpOpen && <KeyHelp onClose={() => setHelpOpen(false)} />}
+      <Sheet open={graphSheet.open} onClose={closeGraphSheet} label="Local graph">
+        <GraphPane
+          around={graphSheet.note}
+          commands={sheetCommands}
+          archive={archive}
+          onOpen={(path, line) => {
+            setGraphSheet((previous) => ({ ...previous, open: false }));
+            void openInPane(path, line);
+          }}
+          onFollow={opening.follow}
+        />
+      </Sheet>
+
       {entries && <CommandPalette entries={entries} onClose={() => setPalette(null)} />}
       {prompts.element}
       {finders.element}
