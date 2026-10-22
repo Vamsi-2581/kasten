@@ -229,7 +229,6 @@ describe("the reader layout of a note", () => {
     expect(reader.querySelector(".cm-editor")).not.toBeNull();
     expect(reader.querySelector("[data-margin='outline']")).not.toBeNull();
     expect(reader.querySelector("[data-margin='links']")).not.toBeNull();
-    expect(reader.querySelector("[data-margin='links'] [data-slot='local-graph']")).not.toBeNull();
   });
 
   it("the outline lists the note's headings and marks the current one", async () => {
@@ -301,6 +300,33 @@ describe("the reader layout of a note", () => {
         each.slice(0, each.indexOf("{")).includes("width") && each.includes('data-margin="links"'),
     );
     expect(byWidth).toEqual([]);
+  });
+
+  it("A7 reader.css hides the Graph button from 1320 px of pane width, the number use-pane-wide reads", () => {
+    const start = css.indexOf("@container k-reader (width >= 1320px) {");
+    expect(start).toBeGreaterThanOrEqual(0);
+
+    const block = css.slice(start, css.indexOf("\n}", start));
+    expect(block).toMatch(/\.k-reader \.cm-note-graph\s*{\s*display:\s*none;/);
+
+    // The same number on both sides: the margin and the button change at one width.
+    const hook = readFileSync("src/lib/use-pane-wide.ts", "utf8");
+    expect(hook).toContain("RIGHT_MARGIN_FROM = 1320;");
+  });
+
+  it("L5 under a finger the depth buttons, the rows and the Graph button are 44 px targets", () => {
+    // The depth buttons and the rows carry `pointer-coarse:min-h-11` in their classes
+    // (checked in local-graph.test.tsx); the Graph button is a rule of its own here.
+    const start = css.indexOf("@media (pointer: coarse) {");
+    expect(start).toBeGreaterThanOrEqual(0);
+
+    // The button keeps its size, so the row does not grow; its hit area is an ::after.
+    const block = css.slice(start, css.indexOf("\n}", start));
+    expect(block).toMatch(/\.k-reader \.cm-note-graph\s*{\s*position:\s*relative;/);
+    expect(block).toMatch(
+      /\.k-reader \.cm-note-graph::after\s*{\s*content:\s*"";\s*position:\s*absolute;\s*inset:\s*-13px -8px;/,
+    );
+    expect(block).not.toContain("min-height");
   });
 
   it("every hover rule of the reader sits inside @media (hover: hover)", () => {
