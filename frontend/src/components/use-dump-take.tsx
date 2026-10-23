@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
 import { TakeToast } from "@/components/take-toast";
 import { readClock } from "@/lib/clock";
+import { quoteBlock } from "@/lib/html-take";
 import { noteName } from "@/lib/note-path";
 // Renamed for the reason `use-prompts.tsx` renames it: the take is a dump, and
 // the page has no other `flush` to confuse it with.
@@ -11,12 +12,13 @@ import { periodicNote } from "@/lib/periodic";
 
 /** A passage held for a take, as the pane names it: the dump's text and where it came from. */
 export interface Taking {
-  /** The dump paragraph, escaped and linked, as `quoteBlock` writes it. */
-  quote: string;
-  /** What the reader selected, unformatted, for the toast and for a note's highlight. */
+  /** What the reader selected, unformatted: the dump's quote, the toast and a note's highlight. */
   text: string;
-  /** The link back to the passage's place, the chapter line of a highlight. */
-  link: string;
+  /**
+   * The link back to the passage's place, written relative to the note it lands in:
+   * the daily note for the dump, the chosen note for Put it in a note.
+   */
+  linkIn: (note: string) => string;
   /** The toast's source line: a heading, or the page's own name. */
   source: string;
   /** The passage sat in the lower half of its frame, so the toast goes to the top (#885). */
@@ -30,7 +32,7 @@ interface Toast {
   id: number;
   title: string;
   text: string;
-  link: string;
+  linkIn: (note: string) => string;
   source: string;
   top: boolean;
   undo?: Undo;
@@ -50,7 +52,13 @@ export function useDumpTake(o: {
   onMarked: (id: number) => void;
   onUnmarked: (id: number) => void;
 }): {
-  /** Keep it on the device, mark it (onMarked) once kept, send it, show the toast. False when it was not kept; the toast says why. */
+  /**
+   * Keep it on the device, mark it (onMarked) once kept, send it, show the toast.
+   * A take the pane forgot (a new document came meanwhile) is still kept and sent,
+   * but it is not marked and gets no toast. A failure to keep still shows its
+   * error, and then returns true, so the pane does not hold the old passage over
+   * the new document. Otherwise false when it was not kept; the toast says why.
+   */
   take(taking: Taking): Promise<boolean>;
   /** Drop the toast (a new document in the pane). */
   forget(): void;
@@ -71,36 +79,54 @@ export function useDumpTake(o: {
     unmarkedRef.current = onUnmarked;
   });
 
-  const forget = useCallback(() => setToast(null), []);
+  // Bumped by a new document, so a take still in flight can tell the pane moved on.
+  const generation = useRef(0);
+  const forget = useCallback(() => {
+    generation.current += 1;
+    setToast(null);
+  }, []);
 
   function show(title: string, taking: Taking, undo?: Undo) {
     toastId.current += 1;
-    const { text, link, source, top } = taking;
-    setToast({ id: toastId.current, title, text, link, source, top, undo });
+    const { text, linkIn, source, top } = taking;
+    setToast({ id: toastId.current, title, text, linkIn, source, top, undo });
   }
 
   async function take(taking: Taking): Promise<boolean> {
     const now = new Date();
     const daily = periodicNote("daily", now).path;
+    const quote = quoteBlock(taking.text, taking.linkIn(daily));
     marks.current += 1;
     const id = marks.current;
+    // Read before the first await, so a forget() during the keep or the send shows.
+    const started = generation.current;
+    const moved = () => started !== generation.current;
 
-    const dump = await keep(taking.quote, readClock(now).date).then(
+    const dump = await keep(quote, readClock(now).date).then(
       (kept) => kept,
       (error: unknown) => {
         show(error instanceof Error ? error.message : "The take was not kept", taking);
         return null;
       },
     );
-    if (dump === null) return false;
+    // The error is shown even over a new document, since the words are saved nowhere else.
+    if (dump === null) return moved();
 
-    markedRef.current(id);
-    taking.onKept?.(id);
+    // Kept on a document the pane has left: the mark and the passage's onKept belong to
+    // the old one, so they are skipped. The line is still sent.
+    if (!moved()) {
+      markedRef.current(id);
+      taking.onKept?.(id);
+    }
     // The same answers `capture` gives, in the take's words.
     const { waiting, failure } = await flushOutbox();
+    if (moved()) return true;
     const mine = waiting.find((each) => each.id === dump.id);
     if (mine === undefined) {
-      show("Taken into today's dump", taking, await undoFor(daily, taking.quote, id));
+      // The daily note is read over the network, so the pane may move on while it is.
+      const undo = await undoFor(daily, quote, id);
+      if (moved()) return true;
+      show("Taken into today's dump", taking, undo);
     } else if (mine.refused !== undefined) {
       show(mine.refused, taking);
     } else if (failure?.kind === "sign-in") {
@@ -130,7 +156,7 @@ export function useDumpTake(o: {
 
   /** Write the passage under `## Highlights` in a note the reader picked. The dump line stays where it is. */
   function putInto(id: number, notePath: string, taken: Toast) {
-    void writePassage(notePath, taken.text, taken.link).then(
+    void writePassage(notePath, taken.text, taken.linkIn(notePath)).then(
       () =>
         setToast((current) =>
           current?.id === id ? { ...current, title: `Put into ${noteName(notePath)}` } : current,

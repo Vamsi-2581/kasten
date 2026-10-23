@@ -136,16 +136,77 @@ export function fileOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+/** Whether a path holds a character a wikilink cannot carry, so it needs a markdown link. */
+export function needsMarkdown(path: string): boolean {
+  return /[[\]|#]/.test(path);
+}
+
+/**
+ * The posix path from the folder of `from` to `to`, both vault paths. Folders the two
+ * share are dropped, and each folder of `from` left over becomes a `..`. A note at
+ * the vault root has no folder, so it climbs none.
+ */
+export function relativePath(from: string, to: string): string {
+  const folders = from.split("/").slice(0, -1);
+  const parts = to.split("/");
+  let shared = 0;
+  while (
+    shared < folders.length &&
+    shared < parts.length - 1 &&
+    folders[shared] === parts[shared]
+  ) {
+    shared += 1;
+  }
+  const climb = folders.slice(shared).map(() => "..");
+  return [...climb, ...parts.slice(shared)].join("/");
+}
+
+/**
+ * `[[<path>#<fragment>|<alias>]]`, or `[<alias>](<address>#<fragment>)` when the
+ * path needs one. `fragment` is given without its `#`, and "" means none. `from`
+ * is the vault path of the note the link is written into.
+ *
+ * A wikilink cannot hold a bracket in its name and has no escape for a bar or a
+ * hash, so such a path is linked the way Obsidian links it: a markdown link whose
+ * address is percent-encoded. A plain markdown link is read from the note's own
+ * folder, so the address is relative to `from`, not to the vault root. The alias
+ * is the link's text, so the caller has already run it through `aliasOf`, which
+ * keeps a bracket from closing the text.
+ */
+export function fileLink(path: string, fragment: string, alias: string, from: string): string {
+  const hash = fragment === "" ? "" : `#${fragment}`;
+  if (!needsMarkdown(path)) return `[[${path}${hash}|${alias}]]`;
+  return `[${alias}](${encodeLinkPath(relativePath(from, path))}${hash})`;
+}
+
+/**
+ * A vault path as a markdown link's address: each segment percent-encoded, the
+ * slashes kept. `encodeURIComponent` leaves `!'()*` alone, and a `(` or a `)` in
+ * an address ends the link early, so those are encoded by hand.
+ */
+export function encodeLinkPath(path: string): string {
+  return path
+    .split("/")
+    .map((segment) =>
+      encodeURIComponent(segment).replace(
+        /[!'()*]/g,
+        (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+      ),
+    )
+    .join("/");
+}
+
 /**
  * `[[<path>#<anchor>|<heading>]]`, the link back to the passage's place on the page.
  *
  * The path is Kasten's own and taken as it is. The anchor is what the page
  * sends, so only the characters an id is made of survive.
  */
-export function pageLink(path: string, passage: PagePassage): string {
+export function pageLink(path: string, passage: PagePassage, from: string): string {
   const anchor = passage.anchor.replace(/[^A-Za-z0-9_.:-]/g, "").slice(0, ANCHOR_CAP);
-  const alias = aliasOf(passage.heading) || fileOf(path);
-  return `[[${path}${anchor === "" ? "" : `#${anchor}`}|${alias}]]`;
+  const name = needsMarkdown(path) ? aliasOf(fileOf(path)) : fileOf(path);
+  const alias = aliasOf(passage.heading) || name;
+  return fileLink(path, anchor, alias, from);
 }
 
 /**
@@ -165,8 +226,8 @@ export function quoteBlock(text: string, link: string): string {
 }
 
 /** The dump paragraph for an HTML page's passage, linked to its place on the page. */
-export function takenQuote(path: string, passage: PagePassage): string {
-  return quoteBlock(passage.text, pageLink(path, passage));
+export function takenQuote(path: string, passage: PagePassage, from: string): string {
+  return quoteBlock(passage.text, pageLink(path, passage, from));
 }
 
 /**

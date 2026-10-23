@@ -2,9 +2,10 @@ import "fake-indexeddb/auto";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type Taking, useDumpTake } from "@/components/use-dump-take";
 import { readClock } from "@/lib/clock";
+import { quoteBlock } from "@/lib/html-take";
 import { noteBase } from "@/lib/note-base";
-import { reset } from "@/lib/outbox";
-import { pdfLink, pdfQuote } from "@/lib/pdf-take";
+import { reset, waiting } from "@/lib/outbox";
+import { pdfLink } from "@/lib/pdf-take";
 import { periodicNote } from "@/lib/periodic";
 
 const { fetchNote, saveNote, updateNote, searchNotes } = vi.hoisted(() => ({
@@ -23,16 +24,15 @@ vi.mock("@/lib/api", () => {
 
 const PATH = "30 Research/report.pdf";
 const TAKING: Taking = {
-  quote: pdfQuote(PATH, 2, "A passage of the report."),
   text: "A passage of the report.",
-  link: pdfLink(PATH, 2),
+  linkIn: (note) => pdfLink(PATH, 2, note),
   source: "page 2, report.pdf",
   top: false,
 };
 
 /** The dump the take writes, and the daily note's text with it in its `## Dump`. */
-const QUOTE = TAKING.quote;
 const DAILY = periodicNote("daily", new Date()).path;
+const QUOTE = quoteBlock(TAKING.text, TAKING.linkIn(DAILY));
 const NOTE = `## Dump\n\n${QUOTE}\n`;
 const REFUSED = "The daily note changed since, so Undo left it as it is";
 
@@ -69,6 +69,14 @@ async function settled(done: () => boolean) {
   for (let turn = 0; turn < 200 && !done(); turn++) {
     await act(() => new Promise<void>((resolve) => setImmediate(resolve)));
   }
+}
+
+/** Lets the outbox send what it holds, and the take that sent it, run to its end. */
+async function drained() {
+  for (let turn = 0; turn < 200 && (await waiting()).length > 0; turn++) {
+    await act(() => new Promise<void>((resolve) => setImmediate(resolve)));
+  }
+  await act(() => new Promise<void>((resolve) => setImmediate(resolve)));
 }
 
 /** The hook's answer for the test's component, read at the moment it is needed. */
@@ -160,5 +168,43 @@ describe("the dump take a pane shares", () => {
       saved: 0,
       unmarked: 0,
     });
+  });
+
+  it("a take the pane forgot before its keep landed is still sent, but is not marked and gets no toast", async () => {
+    const sent = answering();
+    const onMarked = vi.fn();
+    render(<Taker onMarked={onMarked} onUnmarked={() => {}} />);
+
+    act(() => void takeIt());
+    act(() => dump?.forget());
+    await settled(() => dumpsSent(sent).length > 0);
+    await drained();
+
+    expect({
+      sent: dumpsSent(sent).map((dump) => dump.text),
+      marked: onMarked.mock.calls.length,
+      toast: screen.queryByRole("status") !== null,
+    }).toEqual({ sent: [QUOTE], marked: 0, toast: false });
+  });
+
+  it("a take the pane forgot while its Undo was being read shows no toast over the new document", async () => {
+    answering();
+    let release = () => {};
+    const read = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetchNote.mockImplementation(async () => {
+      await read;
+      return NOTE;
+    });
+    render(<Taker onMarked={() => {}} onUnmarked={() => {}} />);
+
+    act(() => void takeIt());
+    await settled(() => fetchNote.mock.calls.length > 0);
+    act(() => dump?.forget());
+    release();
+    await drained();
+
+    expect({ toast: screen.queryByRole("status") !== null }).toEqual({ toast: false });
   });
 });

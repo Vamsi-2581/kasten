@@ -473,4 +473,58 @@ describe("a pdf in kasten's own view", () => {
 
     await showsPage(3);
   });
+
+  it("A3 a markdown link to a pdf whose name holds a | opens the view at page 3", async () => {
+    // The take writes this shape for a path a wikilink cannot hold.
+    const odd = "rehearse/a|b.pdf";
+    fetchAssets.mockResolvedValue([PLAN, odd]);
+    fetchFiles.mockResolvedValue(["rehearse/d.md"]);
+    fetchNote.mockResolvedValue("[ab.pdf, page 3](a%7Cb.pdf#page=3)\n");
+    const app = await renderApp();
+    await settle();
+    app.expand("rehearse");
+    app.click("rehearse/d.md");
+    await settle();
+
+    app.press("g");
+    app.press("f");
+    await settle();
+
+    expect(pdfPane()?.getAttribute("data-pdf-pane")).toBe(odd);
+    expect(pdfPane()?.querySelector<HTMLElement>("[data-pdf-box]")?.scrollTop).toBe(2 * PAGE);
+  });
+
+  it("a link in a folder's index opens the file beside it, not one of the same name elsewhere", async () => {
+    fetchAssets.mockResolvedValue(["A/r.pdf", "B/r.pdf"]);
+    fetchFiles.mockResolvedValue(["B/index.md"]);
+    fetchNote.mockResolvedValue("[r.pdf](r.pdf)\n");
+    const app = await renderApp();
+    await settle();
+    app.expand("B");
+    app.click("B/index.md");
+    await settle();
+
+    app.press("g");
+    app.press("f");
+    await settle();
+
+    expect(pdfPane()?.getAttribute("data-pdf-pane")).toBe("B/r.pdf");
+  });
+
+  it("a link with a leading slash opens nothing, as the backend reads it", async () => {
+    fetchAssets.mockResolvedValue(["r.pdf", "B/r.pdf"]);
+    fetchFiles.mockResolvedValue(["B/index.md"]);
+    fetchNote.mockResolvedValue("[r.pdf](/r.pdf)\n");
+    const app = await renderApp();
+    await settle();
+    app.expand("B");
+    app.click("B/index.md");
+    await settle();
+
+    app.press("g");
+    app.press("f");
+    await settle();
+
+    expect(pdfPane()).toBeNull();
+  });
 });

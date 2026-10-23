@@ -12,7 +12,7 @@ import { TakeButton } from "@/components/take-button-view";
 import { useDumpTake } from "@/components/use-dump-take";
 import { fileOf } from "@/lib/html-take";
 import { type Anchor, low, placeFor } from "@/lib/page-selection";
-import { offsetsIn, oneLine, pdfLink, pdfQuote, rangeIn, takenHighlight } from "@/lib/pdf-take";
+import { offsetsIn, oneLine, pdfLink, rangeIn, takenHighlight } from "@/lib/pdf-take";
 import { usePressGuard } from "@/lib/take-button";
 import { useViewport } from "@/lib/use-viewport";
 
@@ -168,6 +168,9 @@ export function usePdfTake(o: {
   const dump = useDumpTake({
     archive,
     onMarked: () => {
+      // A selection made after `y` (set while the keep runs) is the reader's next take,
+      // so it is left alone; only the take's own selection is cleared.
+      if (heldRef.current !== null) return;
       hold(null);
       // Taken, so the words are no longer a selection the reader is making.
       document.getSelection()?.removeAllRanges();
@@ -238,9 +241,8 @@ export function usePdfTake(o: {
     const parts = frame === null ? [] : partsOf(frame, taken.range);
     const started = generation.current;
     const kept = await dump.take({
-      quote: pdfQuote(path, taken.page, taken.text),
       text: taken.text,
-      link: pdfLink(path, taken.page),
+      linkIn: (note) => pdfLink(path, taken.page, note),
       source: `page ${taken.page}, ${fileOf(path)}`,
       top: low(taken.at),
       // Each take carries its own parts, so takes in flight cannot mix them.
