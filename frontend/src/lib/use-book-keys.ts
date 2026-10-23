@@ -2,6 +2,7 @@ import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef } from 
 import { type EditorCommands, TERMINAL, TERMINAL_CHORD } from "@/lib/key-bindings";
 import type { BookTake } from "@/lib/use-book-take";
 import type { BookTurns } from "@/lib/use-book-turns";
+import { beginLeader, paneOpener } from "@/lib/which-key";
 
 /**
  * The keys the book pane answers, attached to its wrapper.
@@ -62,14 +63,32 @@ export function useBookKeys(o: {
         return;
       }
 
+      // `?` is shift and `/`, so it is read ahead of the modifier check. This
+      // handler is the only one a section frame's keys reach, the window's
+      // listener never sees them.
+      if (event.key === "?" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        event.preventDefault();
+        commandsRef.current.showHelp();
+        return;
+      }
+
       if (event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return;
 
-      // No leader: the pane holds a document you page with the space bar in every
-      // other reader, and the chords already carry the way out.
+      // The book has a leader now because the redesign's epic (#776) wants one in
+      // every page, PDF, book and video alike. Space turns no page here: the
+      // turns are `l` and `h`, so Space is free to open the panel.
+      // The wrapper and not the focused element: that is the foliate host, which
+      // takes no focus, so the panel would hand back a focus nothing can hold.
+      if (event.key === " ") {
+        if (beginLeader(paneOpener(commandsRef.current, wrapper.current))) {
+          event.preventDefault();
+        }
+        return;
+      }
       if (event.key === "l" || event.key === "h") turn(event.key === "l" ? "next" : "prev");
       else if (event.key === "q") commandsRef.current.closeNote();
       // vim's own key for writing what you are looking at out to a file, said
-      // bare for the reason `q` is: this pane has no leader.
+      // bare the way `q` is, so the reader does it in one press.
       else if (event.key === "w") commandsRef.current.exportNote();
       // Nothing selected is nothing to take, the way `t` on a book still opening
       // is nothing to draw.
@@ -83,7 +102,7 @@ export function useBookKeys(o: {
       // handler's identity is still fixed for the life of the pane and the view
       // effect naming it rebuilds nothing.
     },
-    [contentsOpen, take, openContents, turn],
+    [contentsOpen, take, openContents, turn, wrapper],
   );
 
   // On the wrapper as well as on every section, and in an effect of its own so
