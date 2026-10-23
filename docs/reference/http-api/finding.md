@@ -37,7 +37,15 @@ Finds every line in the vault holding `q`, ignoring case. Takes `q` and an
 optional `archive`, and answers with at most 2,000 matches.
 
 ```json
-[{ "path": "projects/kasten.md", "line": 4, "text": "Postgres holds a derived index." }]
+[
+  {
+    "path": "projects/kasten.md",
+    "line": 4,
+    "text": "Postgres holds a derived index.",
+    "date": "2026-10-07",
+    "tags": ["#kasten"]
+  }
+]
 ```
 
 Nothing is indexed and Postgres is not consulted. `rg` reads the notes on every
@@ -73,6 +81,37 @@ The cap of 2,000 is about what crosses the wire, not what the machine can do:
 client ranks everything it is handed and cuts afterwards, the rows on screen
 are the best of the match set rather than the head of it, and 2,000 is the
 whole match set for anything but the most common word in a vault.
+
+Each hit also carries `date` and `tags`, which the search histogram counts and
+filters by. Both belong to the hit's note and not to the line. `date` is the
+day the note counts on, taken from the first of these that holds:
+
+1. the note's file name starts with a real date, as a daily note
+   `2026-10-07.md` or a dated note `2026-09-18 Enablement.md` does. This is a
+   calendar day, `YYYY-MM-DD`, which needs no zone;
+2. the note's `created` field in its frontmatter, as written. kasten writes it
+   in UTC with its offset, so the value is an instant such as
+   `2026-10-18T22:30:00+00:00`. A bare `YYYY-MM-DD` is a calendar day and comes
+   back as it is. A time with no offset comes back as written, and a browser
+   reads it in the reader's own zone. Any other form, such as a week date, is
+   skipped;
+3. the file's modification time, as an instant in UTC with its offset.
+
+So `date` is a calendar day or an instant. The client reads a plain day by its
+shape and every other value as an instant. The instant is not cut to a day here because the day depends on
+whose clock reads it. A note written at 00:30 in Berlin is stamped on the day
+before in UTC, and the server cannot know the reader's zone. The client
+converts the instant to the reader's zone and takes the day there.
+
+The note's own date stands for every line in it because a line's date would
+need a `jj annotate` of each note on each query. `created` comes before the
+modification time because the histogram counts when things were written, and a
+note edited today would otherwise count as written today. `date` is None when
+the note can no longer be read.
+
+`tags` is every tag the note holds, each with its hash and sorted, read as
+`GET /api/tags` reads them: inline tags and the frontmatter's `tags` field.
+`tags` is None when the note can no longer be read.
 
 ## GET /api/mentions
 

@@ -12,6 +12,7 @@ from kasten_backend.graph_query import query_graph
 from kasten_backend.history import HistoryError, list_changes, plain, read_version
 from kasten_backend.mentions import find_mentions
 from kasten_backend.search import search_vault
+from kasten_backend.search_meta import notes_meta
 from kasten_backend.tags import find_tags
 from kasten_backend.todos import find_todos, projects_of
 from kasten_backend.vault import (
@@ -27,8 +28,8 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
-class SearchHit(BaseModel):
-    """One line in the vault that matched, and enough to open the note on it."""
+class LineHit(BaseModel):
+    """One line in the vault, and enough to open the note on it."""
 
     path: str
     """The note the line is in, relative to the vault root."""
@@ -40,14 +41,34 @@ class SearchHit(BaseModel):
     """The line itself, for the client to show and to rank."""
 
 
-class TodoHit(SearchHit):
+class SearchHit(LineHit):
+    """One line that matched a search, with the date and tags of the note it is in."""
+
+    date: str | None = None
+    """The date the note counts on, as ISO 8601: a calendar day or an instant.
+
+    A calendar day (`YYYY-MM-DD`) when the note's name starts with one, which needs
+    no zone. Otherwise an instant, from the note's `created` as written or its
+    file's modification time in UTC with its offset. The instant is not cut to a
+    day here because the day depends on the reader's zone: `created` is written
+    in UTC, so a note written at 00:30 in Berlin is the day before in UTC. The
+    client reads the instant in its own zone.
+
+    Read by `search_meta.notes_meta`. None when the note could not be read.
+    """
+
+    tags: list[str] | None = None
+    """The note's tags, each with its hash, sorted. None when the note could not be read."""
+
+
+class TodoHit(LineHit):
     """One todo line, or one running session line, and the project it belongs to."""
 
     project: str | None
     """The project folder, `02 Projects/FDE`, by the rule `todos.projects_of` reads.
 
-    Its own model rather than a field on `SearchHit`, which search and the
-    cards answer with too and which have no project to give.
+    Its own model rather than a field on `LineHit`, which the cards answer with
+    too and which have no project to give.
     """
 
 
@@ -132,7 +153,17 @@ async def search_files(
     the answer rather than merely lengthening it.
     """
     hits = await search_vault(settings.vault_path, q, None if archive else settings.archive_path)
-    return [SearchHit(path=hit.path, line=hit.line, text=hit.text) for hit in hits]
+    meta = await notes_meta(settings.vault_path, [hit.path for hit in hits])
+    return [
+        SearchHit(
+            path=hit.path,
+            line=hit.line,
+            text=hit.text,
+            date=meta[hit.path][0],
+            tags=meta[hit.path][1],
+        )
+        for hit in hits
+    ]
 
 
 @router.get("/api/mentions")
@@ -252,7 +283,7 @@ async def list_todos(
 @router.get("/api/cards")
 async def list_cards(
     settings: Annotated[Settings, Depends(get_settings)], archive: bool = False
-) -> list[SearchHit]:
+) -> list[LineHit]:
     """Find every line in the vault that could be part of a flashcard.
 
     Candidate lines, not cards. Which of them is a question, which note is a
@@ -268,7 +299,7 @@ async def list_cards(
     about it, and nothing else about the note changes.
     """
     hits = await find_cards(settings.vault_path, None if archive else settings.archive_path)
-    return [SearchHit(path=hit.path, line=hit.line, text=hit.text) for hit in hits]
+    return [LineHit(path=hit.path, line=hit.line, text=hit.text) for hit in hits]
 
 
 @router.get("/api/review/limits")
