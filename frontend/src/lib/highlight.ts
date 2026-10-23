@@ -7,6 +7,7 @@
  * cannot be tested against exact text.
  */
 
+import { unescapeParagraph } from "@/lib/html-take";
 import { encodePath } from "@/lib/note-path";
 import { appendUnder } from "@/lib/note-section";
 
@@ -97,6 +98,9 @@ const ANCHOR = /\^(hl-[0-9a-f]{6})\s*$/;
  * somebody hand wrapped reads as markdown reads it, one paragraph, and a hand
  * doubled space would otherwise never match the book. Both are the identity on
  * anything the writer wrote.
+ *
+ * Not unescaped here: `HighlightBlock` keeps the quote both ways, since a
+ * highlight written before the escape existed holds the book's own backslashes.
  */
 function paragraphs(run: string[]): string[] {
   const groups: string[][] = [[]];
@@ -115,8 +119,17 @@ function paragraphs(run: string[]): string[] {
 export interface HighlightBlock {
   /** The anchor id, `hl-` and six hex, which is what the overlay is keyed by. */
   id: string;
-  /** The quote's paragraphs, as the book should hold them. */
+  /**
+   * The quote's paragraphs as the book should hold them: the note's words with
+   * the take's escape read back. What the page shows.
+   */
   quote: string[];
+  /**
+   * The quote's paragraphs as the note holds them, escape and all. A passage
+   * written before the escape existed is the book's own words, so the book may
+   * hold this and not `quote`; `findWritten` tries both.
+   */
+  raw: string[];
   /** The first and last line of the block, counting from one, the way CodeMirror does. */
   from: number;
   to: number;
@@ -145,18 +158,20 @@ export function highlightBlocks(note: string): HighlightBlock[] {
     while (first > 0 && lines[first - 1]?.startsWith(">")) first -= 1;
     if (first === index - 1) continue;
 
-    const quote = paragraphs(lines.slice(first, index - 1));
+    const raw = paragraphs(lines.slice(first, index - 1));
     // A run edited down to a lone `>` leaves no paragraph, which is a question
     // the finder should never be asked.
-    if (quote.length === 0) continue;
-    blocks.push({ id: anchor[1] as string, quote, from: first + 1, to: index + 1 });
+    if (raw.length === 0) continue;
+    const quote = raw.map(unescapeParagraph);
+    blocks.push({ id: anchor[1] as string, quote, raw, from: first + 1, to: index + 1 });
   }
 
   return blocks;
 }
 
 /**
- * The quote of the block `line` sits in, or null outside one.
+ * The quote, as written, of the block `line` sits in, or null outside one. As
+ * written, so `findWritten` can read it back and try the book's own words too.
  *
  * All of `note` is scanned, measured at 0.2ms on a note holding two hundred
  * highlights. A reader that walked out from the cursor instead would need the
@@ -164,9 +179,7 @@ export function highlightBlocks(note: string): HighlightBlock[] {
  * less than a whole note.
  */
 export function highlightAt(note: string, line: number): string[] | null {
-  return (
-    highlightBlocks(note).find((block) => line >= block.from && line <= block.to)?.quote ?? null
-  );
+  return highlightBlocks(note).find((block) => line >= block.from && line <= block.to)?.raw ?? null;
 }
 
 /**

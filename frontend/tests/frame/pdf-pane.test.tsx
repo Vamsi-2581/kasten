@@ -37,7 +37,8 @@ const { fetchBook, fetchNote } = vi.hoisted(() => ({ fetchBook: vi.fn(), fetchNo
 // job runs no backend and vite proxies `/api` to a dead port, and seeded query
 // data is stale at once, so mounting would refetch against that dead port and
 // swap the failure panel in over a page that had already drawn.
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   fetchBook,
   fetchNote,
   fetchImages: () => Promise.resolve([]),
@@ -121,6 +122,8 @@ async function drawPdf(note = "", seek?: { quote: string[] }) {
         onMoved={() => {}}
         onLeaving={() => {}}
         onTake={onTake}
+        archive={false}
+        onNoteBeside={() => {}}
         onNotice={onNotice}
         seek={seek}
       />
@@ -179,9 +182,11 @@ describe("the reader over a real pdf", () => {
     // is the only place the reader is told, and a fixed-layout renderer reports
     // `fraction: 0` on its own event, the whole-book number being worked out a
     // layer up.
-    await vi.waitFor(() => expect(container.querySelector("footer")?.textContent).toBe("67%"), {
-      timeout: 20_000,
-    });
+    // The footer names the chapter before the share since #789, so only the share is read.
+    await vi.waitFor(
+      () => expect(container.querySelector("footer")?.textContent).toContain("67% of the book"),
+      { timeout: 20_000 },
+    );
   }, 40_000);
 
   it("offers the take button over a selection, which a fixed-layout book refuses", async () => {
@@ -403,7 +408,9 @@ describe("the reader over a real pdf", () => {
           onFocus={() => {}}
           onMoved={() => {}}
           onLeaving={() => {}}
-          onTake={() => {}}
+          onTake={async () => null}
+          archive={false}
+          onNoteBeside={() => {}}
           onNotice={() => {}}
         />
       </QueryClientProvider>,

@@ -74,8 +74,11 @@ the other panes. `?` opens key help.
 
 | Key | Does |
 | --- | --- |
-| `h` | Turn back a page |
-| `l` | Turn forward a page |
+| `h` | Turn back a page, or a screen of the text in a flowing epub |
+| `l` | Turn forward a page, or a screen of the text in a flowing epub |
+| `j` | Scroll the text down three lines, or turn the page of a pdf or a pre-paginated epub |
+| `k` | Scroll the text up three lines, or turn the page back |
+| `Escape` | Put the selection away and give the keys back to kasten |
 | `t` | Open the contents |
 | `y` | Take the selected passage into the note |
 | `w` | Download the book as a file |
@@ -94,7 +97,7 @@ a second however fast the key repeats.
 writing what you are looking at out to a file, said bare here for the reason `q`
 is.
 
-The six bare keys answer an unmodified press only, so `Ctrl+H` is left to the
+The bare keys answer an unmodified press only, so `Ctrl+H` is left to the
 browser's history window. The chords are the terminal's own, read from
 `TERMINAL` and `TERMINAL_CHORD` in `frontend/src/lib/key-bindings.ts`, so
 retuning one retunes both panes.
@@ -106,9 +109,10 @@ answering the moment you clicked the text. The pane puts the same handler on
 every chapter document the renderer reports.
 
 `t` draws the book's contents over the page, and only over the pane, so the
-note beside it stays on screen. `j` and `k` walk the chapters, Enter opens the
-one under the cursor, and Escape puts the list away with the book still on the
-page you were on. The cursor opens on the chapter you are in, so walking back to
+note beside it stays on screen. While the list is open `j` and `k` walk the
+chapters, Enter opens the one under the cursor, and Escape puts the list away
+with the book still on the page you were on. With the list closed `j` and `k`
+scroll the text. The cursor opens on the chapter you are in, so walking back to
 chapter one is `k` held down rather than a hunt. The list is the publisher's
 own, so a nested chapter is drawn indented, and a part heading the book gave no
 link to is a row Enter does nothing on. A pdf's list is its own outline, walked
@@ -151,8 +155,9 @@ way.
 Where an epub names the chapter, a pdf names the outline entry the page sits
 under, and `Page N` where the pdf carries no outline at all.
 
-Opening a book draws the note's highlights on the page, in the app's accent
-colour, for every passage the chapter on screen holds. Paging into another
+Opening a book draws the note's highlights on the page, in the app's mark
+colour at the strength the token gives it, for every passage the chapter on
+screen holds. Paging into another
 chapter draws its own as it arrives. Delete a highlight in the editor and save,
 and it stops being drawn without you touching the reader; edit a quote's
 wording so the book no longer holds it, and nothing is drawn for it and nothing
@@ -166,9 +171,41 @@ a press, so you asked for it, and a buffer with unsaved text in it says
 `:e!`, which is what ticking a todo
 in the pane already does.
 
-The line at the bottom of the pane says how far through the whole book you are,
-to the nearest percent. It counts every chapter rather than the one you are in,
-and it says nothing at all where the book gives no honest number to count.
+The text is set in the app's own serif, Newsreader, at 19 px with 1.6 leading,
+in the app's ink on the app's ground, in both themes and every palette. Code
+keeps the app's mono, and a selection takes the highlight colour. These win
+over the book's own colours and fonts, so a book written for a white page reads
+on the dark one. A switch of theme or palette restyles the text where you
+are and keeps your place. A flowing epub reads in one column at the reading
+measure, 680 px.
+
+A wide pane uses the room either side of the text. From 1015 px of pane width
+the book's contents sit in a 224 px column on the left, the chapter you are in
+marked in the accent with a bar beside it, and a click on a chapter goes there.
+From 1303 px the passages taken so far sit in a 288 px column on the right,
+under `Taken`, in the note's order, and a click on one goes to it in the book.
+Each pane measures itself, so the two halves of a split decide alone, and a
+phone shows the text alone. The header row reads `BOOK`, the note's name in
+mono, the chapter and the percent, and `The book's note` on the right, which
+opens the note in a pane beside the book, as the pdf pane's Note beside does.
+
+A take shows a note at the foot of the text: `Taken into the book's note`, the
+passage, the chapter and the note's name, with Undo and Put it in a note. Undo
+takes the block back out of the note, the mark with it, while the note is as
+the take left it; if anything wrote the note since, Undo says `The book's note
+changed since, so Undo left it as it is` and writes nothing. Put it in a note
+writes the passage under `## Highlights` of a note you pick, linked back to the
+block in the book's note, `[[<note>#^hl-xxxxxx|<chapter>]]`, or by a markdown
+link with the path encoded where the note's name holds `[`, `]`, `|` or `#`. A
+take that lands after the pane opened another book shows nothing. The book's
+words and chapter are written through the same escape as a page's passage, so
+a passage holding `## Dump`, a fence, a todo or a link stays inside its quote,
+and the reader takes the escape off again when it looks for the passage.
+
+The line at the bottom of the pane names the chapter you are in and says how
+far through the whole book you are, `N% of the book`, to the nearest percent. It
+counts every chapter rather than the one you are in, and it says nothing at all
+where the book gives no honest number to count.
 
 A click inside the book also tells the route that this pane has the focus.
 Nothing else would: a paragraph cannot hold focus, so a click in there fires no

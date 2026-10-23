@@ -89,16 +89,51 @@ function escapeParagraph(paragraph: string): string {
 }
 
 /**
+ * `escapeParagraph` read back, for a highlight's quote as the note holds it.
+ *
+ * One pass from the left, so each backslash is read with the character after
+ * it and a `\\` is never read twice. Every backslash the writer leaves is an
+ * escape, which is why a lone one before a character that is not escaped (the
+ * `a\b` of a note written before the escape existed) stays as it is.
+ */
+export function unescapeParagraph(paragraph: string): string {
+  return paragraph.replace(
+    /\\([\\`[\]<>!|~$%^\-+*=.)])|&#35;/g,
+    (_, escaped?: string) => escaped ?? "#",
+  );
+}
+
+/**
+ * The text as its paragraphs: split on line breaks, control characters gone,
+ * each paragraph collapsed, the empty ones dropped. Shared by the capped and the
+ * uncapped escape, so the two cannot disagree on where a paragraph is.
+ */
+function paragraphsOf(text: string): string[] {
+  return text
+    .split(BREAK)
+    .map((line) => collapse(line.replace(CONTROL, "")))
+    .filter((paragraph) => paragraph !== "");
+}
+
+/**
+ * The passage as escaped paragraphs, one line each, no `> `, and no cap.
+ *
+ * For the book's note, which keeps a passage whole: a quote cut short is never
+ * found in the book again. A tab is a space here, since Chrome puts one between
+ * a table's cells in the selection and removing it would run two words into one.
+ */
+export function escapedParagraphs(text: string): string[] {
+  return paragraphsOf(text.replace(/\t/g, " ")).map(escapeParagraph);
+}
+
+/**
  * The passage as escaped, collapsed, capped paragraphs, one line each, no `> `.
  *
  * The cap is taken before the escapes, so it counts the characters the reader
  * sees rather than the backslashes added to them.
  */
 export function quoteParagraphs(text: string): string[] {
-  const paragraphs = text
-    .split(BREAK)
-    .map((line) => collapse(line.replace(CONTROL, "")))
-    .filter((paragraph) => paragraph !== "");
+  const paragraphs = paragraphsOf(text);
 
   // A page can send thousands of lines, and each becomes a line of the note, so
   // the paragraph count is capped as well as the characters. The last one kept
