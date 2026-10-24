@@ -7,6 +7,8 @@
  * and the player's replies are sent as events.
  */
 
+import { syntaxTreeAvailable } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
 import "./html-take-api";
 import { commands as browser, page, userEvent } from "vitest/browser";
 import type { Passage } from "@/lib/highlight";
@@ -30,6 +32,20 @@ import {
   talkNote,
   VIDEO,
 } from "./video-pane-fixture";
+
+/**
+ * The 00:31 button once the split from `Space g v` has landed and the editor there
+ * has parsed the whole note. The split remounts the note's editor today (#932), so
+ * the wait is for the split and the parse, and holds whether or not it remounts.
+ */
+function settledTime(host: HTMLElement): HTMLElement | null {
+  if (host.querySelectorAll("[data-pane]").length !== 2) return null;
+  const content = host.querySelector<HTMLElement>(".cm-content");
+  if (content === null) return null;
+  const view = EditorView.findFromDOM(content);
+  if (view === null || !syntaxTreeAvailable(view.state, view.state.doc.length)) return null;
+  return content.querySelector<HTMLElement>('.cm-time[data-seconds="31"]');
+}
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/api")>();
@@ -259,7 +275,13 @@ describe("a time in a note reaches the video pane of that note", () => {
     if (!frame) throw new Error("no video frame");
     const sent = spyFrame(frame);
 
-    const time = route.host.querySelector<HTMLElement>('.cm-time[data-seconds="31"]');
+    let time: HTMLElement | null = null;
+    await expect
+      .poll(() => {
+        time = settledTime(route.host);
+        return time;
+      })
+      .not.toBeNull();
     if (!time) throw new Error("no 00:31 time button");
     await userEvent.click(time);
 
