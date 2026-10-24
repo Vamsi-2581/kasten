@@ -339,8 +339,6 @@ class HeadPlugin {
   private readonly view: EditorView;
   private readonly toggle: () => void;
   private readonly head: HTMLElement | null;
-  /** The content's own top padding, which the header's height is added to. */
-  private readonly basePadding: number;
   private observer: ResizeObserver | null = null;
   private data: Head | null;
   private shown = "";
@@ -351,7 +349,6 @@ class HeadPlugin {
     this.data = read(view.state).head;
     this.head =
       view.state.facet(notePath) === undefined ? null : make("div", { class: "cm-note-head" });
-    this.basePadding = parseFloat(getComputedStyle(view.contentDOM).paddingTop) || 0;
     if (this.head) {
       view.scrollDOM.insertBefore(this.head, view.contentDOM);
       // jsdom has no ResizeObserver, and a browser without one is measured on each change.
@@ -407,7 +404,8 @@ class HeadPlugin {
       write: ({ left, width, height }) => {
         head.style.left = `${left}px`;
         head.style.width = `${width}px`;
-        view.contentDOM.style.paddingTop = `${this.basePadding + height}px`;
+        // The header's height takes the place of the content's own top padding, as it always did.
+        view.contentDOM.style.paddingTop = `${height}px`;
       },
     });
   }
