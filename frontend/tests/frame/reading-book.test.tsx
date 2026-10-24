@@ -96,6 +96,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   localStorage.removeItem("kasten.workspace.1");
   localStorage.removeItem("kasten.workspace.coarse.1");
+  localStorage.removeItem("kasten.vim");
   await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: false });
   await page.viewport(414, 896);
 });
@@ -131,6 +132,11 @@ const notice = () => document.querySelector<HTMLElement>("[data-testid='notice']
 async function opened(width: number, height: number, touch: boolean): Promise<void> {
   await page.viewport(width, height);
   await cdp().send("Emulation.setTouchEmulationEnabled", { enabled: touch, maxTouchPoints: 5 });
+  // Said outright at a desk, where the leader is typed: with no choice stored,
+  // vim mode follows `(pointer: coarse)`, which another frame file's touch
+  // emulation or a `kasten.vim` it left can answer, and with vim off the Space
+  // is typed into the note instead (#909).
+  if (!touch) localStorage.setItem("kasten.vim", "on");
   await mount();
   await expect.poll(() => document.querySelector(".cm-content")).not.toBeNull();
 }

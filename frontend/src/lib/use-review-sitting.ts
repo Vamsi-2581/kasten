@@ -5,14 +5,31 @@ import { appendStub, setSuspended, writeSchedule } from "@/lib/card-write";
 import { readClock } from "@/lib/clock";
 import type { Deck, Limits } from "@/lib/review";
 import { cardsOf, type Seat, seatsFor } from "@/lib/review-queue";
-import type { Rating } from "@/lib/srs";
-import { nextSchedule, writeNoteSchedule, writeNoteSuspended } from "@/lib/srs-schedule";
+import type { Card, Rating, Schedule } from "@/lib/srs";
+import {
+  answeredToday,
+  nextSchedule,
+  writeNoteSchedule,
+  writeNoteSuspended,
+} from "@/lib/srs-schedule";
 import { soundsShowing } from "@/lib/use-card-sounds";
 import { useReviewLimits } from "@/lib/use-review-limits";
 import { useSittingWrites } from "@/lib/use-sitting-writes";
 
 /** What the sitting refuses an undo with when the note moved on since the step. */
 const MOVED_ON = "The note changed since that step, so it was not undone.";
+
+/**
+ * The schedule a rating writes for the card on screen.
+ *
+ * One place for it, because the write and the interval the button shows must
+ * never disagree. A card new at the start keeps answering as a first answer until
+ * it leaves the queue. Anki's learning steps do the same, setting the first gap
+ * from the last answer, and `answeredToday` then still reads the card as new.
+ */
+function scheduleFor(seat: Seat, held: Card, rating: Rating, today: string): Schedule {
+  return nextSchedule(seat.fresh ? null : held.held, rating, today);
+}
 
 /**
  * The last rating or suspend, held so Undo can take it back.
@@ -47,7 +64,16 @@ interface Step {
  * under it, but it can never add or remove a card, so card three stays card
  * three and the ordinals survive a rewrite that the line numbers do not.
  */
-export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) {
+export function useReviewSitting(
+  deck: Deck,
+  play: (sources: string[]) => void,
+  /**
+   * Set while a swiped card is in flight, which the sitting refuses everything
+   * over: the grade the flight ends in is the only write until it lands. A ref, not
+   * state, so a press that lands in the same frame is refused too.
+   */
+  flying: { current: boolean },
+) {
   const [texts, setTexts] = useState<Map<string, string> | null>(null);
   const [queue, setQueue] = useState<Seat[]>([]);
   const [revealed, setRevealed] = useState(false);
@@ -113,19 +139,53 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
   // the four ratings are the only thing its footer ever draws.
   const shown = revealed || card?.back === "";
 
+  // The interval each button shows, which is the one the rating writes, since
+  // both come from `scheduleFor`.
+  const next = useMemo(() => {
+    if (seat === undefined || card === undefined) return null;
+    const days = (rating: Rating) => scheduleFor(seat, card, rating, today).interval;
+    return { again: days("again"), hard: days("hard"), good: days("good"), easy: days("easy") };
+  }, [card, seat, today]);
+
+  // The done screen's "next due": the earliest day after today a card of this
+  // deck comes back. A parked card comes back on no day the screen can name.
+  const nextDue = useMemo(() => {
+    const dues = [...cards.values()].flatMap((each) =>
+      each.flatMap(({ held, parked }) =>
+        parked === null && held !== null && held.due > today ? [held.due] : [],
+      ),
+    );
+    const [first] = dues.sort();
+    return first ?? null;
+  }, [cards, today]);
+
+  // What the deck did today, whichever sitting did it, and whether new cards are
+  // held back for another day. The done screen says both.
+  const doneToday = useMemo(
+    () =>
+      [...cards.values()]
+        .flat()
+        .filter(({ held, parked }) => parked === null && answeredToday(held, today) !== null)
+        .length,
+    [cards, today],
+  );
+  const newCount = useMemo(
+    () =>
+      [...cards.values()].flat().filter(({ held, parked }) => parked === null && held === null)
+        .length,
+    [cards],
+  );
+
   const rate = useCallback(
     (rating: Rating) => {
       // Held while an undo is out: its landing puts back the queue and the
       // count as they stood before the step, over anything done meanwhile.
-      if (texts === null || seat === undefined || undoing) return;
+      if (texts === null || seat === undefined || undoing || flying.current) return;
       const text = texts.get(seat.note);
       const held = cards.get(seat.note)?.[seat.at];
       if (text === undefined || held === undefined) return;
 
-      // A card new at the start keeps answering as a first answer until it leaves
-      // the queue. Anki's learning steps do the same, setting the first gap from
-      // the last answer, and `answeredToday` then still reads the card as new.
-      const moved = nextSchedule(seat.fresh ? null : held.held, rating, today);
+      const moved = scheduleFor(seat, held, rating, today);
       const next = deck.whole ? writeNoteSchedule(text, moved) : writeSchedule(text, held, moved);
       setTexts((was) => new Map(was).set(seat.note, next));
       setRevealed(false);
@@ -144,7 +204,7 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
       setStep({ note: seat.note, text, next, queue, done, typed });
       write(seat.note, text, next);
     },
-    [cards, deck, done, play, queue, seat, texts, today, typed, undoing, write],
+    [cards, deck, done, play, queue, seat, texts, today, typed, undoing, write, flying.current],
   );
 
   /**
@@ -156,7 +216,7 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
    * card it did before.
    */
   const suspend = useCallback(() => {
-    if (texts === null || seat === undefined || undoing) return;
+    if (texts === null || seat === undefined || undoing || flying.current) return;
     const text = texts.get(seat.note);
     const held = cards.get(seat.note)?.[seat.at];
     if (text === undefined || held === undefined) return;
@@ -181,7 +241,7 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
 
     setStep({ note: seat.note, text, next, queue, done, typed });
     write(seat.note, text, next);
-  }, [cards, deck, done, play, queue, seat, texts, typed, undoing, write]);
+  }, [cards, deck, done, play, queue, seat, texts, typed, undoing, write, flying.current]);
 
   /**
    * Take back the last rating or suspend: the note's old text, and the card on
@@ -194,7 +254,7 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
    * the write has landed. One step: the step goes whatever came of it.
    */
   const undo = useCallback(() => {
-    if (step === null || undoing) return;
+    if (step === null || undoing || flying.current) return;
     setStep(null);
     setUndoing(true);
     void write(step.note, step.next, step.text).then((error) => {
@@ -207,7 +267,7 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
       setTyped(step.typed);
       setDone(step.done);
     });
-  }, [step, undoing, write]);
+  }, [step, undoing, write, flying.current]);
 
   /**
    * Write what was jotted at the end of the note the card on screen came from.
@@ -223,7 +283,7 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
   function jot(note: string, question: string): boolean {
     // Kept in the line while an undo is out: written behind it, the jot would
     // name the text the undo replaces and be refused, losing the question.
-    if (texts === null || undoing) return false;
+    if (texts === null || undoing || flying.current) return false;
     const text = texts.get(note);
     if (text === undefined || question.trim() === "") return false;
 
@@ -234,12 +294,12 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
   }
 
   const reveal = useCallback(() => {
-    if (card === undefined || undoing) return;
+    if (card === undefined || undoing || flying.current) return;
     setRevealed(true);
     // Once, on the turn: a second space on an answer already showing is not a
     // request to hear it again, `r` and Replay being that.
     if (!shown) play(soundsIn(card.back));
-  }, [card, play, shown, undoing]);
+  }, [card, play, shown, undoing, flying.current]);
 
   return {
     texts,
@@ -248,6 +308,11 @@ export function useReviewSitting(deck: Deck, play: (sources: string[]) => void) 
     card,
     revealed,
     shown,
+    next,
+    nextDue,
+    doneToday,
+    newCount,
+    today,
     typed,
     setTyped,
     done,

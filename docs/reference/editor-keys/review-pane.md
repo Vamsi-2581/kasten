@@ -1,7 +1,7 @@
 ---
 type: Reference
 title: Editor keys, the review pane
-description: The review pane's keys for a sitting, its folds, parking, jots and undo.
+description: The review pane's keys for a sitting, its folds, parking, new questions and undo.
 tags: [editor, keyboard, review, flashcards, frontend]
 status: stable
 ---
@@ -20,15 +20,18 @@ of each is waiting. Picking one starts a sitting, one card at a time.
 | `za` | Fold or unfold the deck under the cursor |
 | `p` | Open [the parked list](/reference/flashcard-format/reviewing-cards.md#parking-a-card) |
 | `h` | Leave the sitting or the parked list, back to the decks |
-| `Enter` | Show the answer |
-| `Space` | Open [the which-key panel](/reference/editor-keys/leader.md) while the card is hidden |
+| `Enter` | Show the answer. Once it shows, grade the card Good, unless a button or link in the pane has the focus; then the key does nothing here, and that button or link takes it. On a whole note, which shows from the start, it does nothing |
+| `Space` | As `Enter`. With no card on screen, open [the which-key panel](/reference/editor-keys/leader.md) |
 | `1` `2` `3` `4` | Rate the card Again, Hard, Good, Easy |
-| `s` | Park the card on screen, before or after the answer |
-| `n` | Jot a new question into the note the card came from, or put the open jot line away unwritten |
+| `s` | Park the card on screen, before or after the answer, as the Park this card link does |
+| `n` | Write a new question into the note the card came from, as the Write a new question link does, or put the open jot line away unwritten |
 | `r` | Play the sounds of the side showing again: the question's before the answer, the answer's after |
 | `u` | In a sitting, undo the last rating or suspend; on the parked list, put the row under the cursor back |
 | `o` | Open the note the parked row is written in |
 | `q` | Close the pane |
+
+A held key does not repeat. `Space`, `Enter` and `1` to `4` act once per press,
+so holding one down rates or reveals a card once and no more.
 
 `j` and `k` move the focus itself rather than a highlight of their own, so
 Enter on the deck they reach opens it the way the browser already opens a

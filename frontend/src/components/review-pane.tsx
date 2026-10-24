@@ -13,8 +13,8 @@ interface ReviewPaneProps {
   commands: EditorCommands;
   /** Close the pane, which is `q`. */
   onClose: () => void;
-  /** Open a note in a pane, the way `ExamPane` is handed the same job. */
-  onOpen: (path: string) => void;
+  /** Open a note in a pane, at a line when the card has one. The way `ExamPane` is handed the same job. */
+  onOpen: (path: string, line?: number) => void;
   /** Raised when the pane this sits in has been moved to. See `Editor`. */
   focusSignal?: number;
 }
@@ -54,6 +54,8 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
   const [pending, setPending] = useState("");
   const controls = useRef<{
     showing: boolean;
+    shown: boolean;
+    revealed: boolean;
     reveal: () => void;
     rate: (rating: Rating) => void;
     suspend: () => void;
@@ -107,6 +109,15 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
     // The leader above still runs, which is the one thing that has to.
     const target = event.target as HTMLElement;
     if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+
+    // A held key repeats, and each repeat would answer the card again. The first
+    // press did the work, so the repeats of the answering keys do nothing. This
+    // comes before anything else the pane does with a key, so a repeat is
+    // consumed here whatever the focus is on.
+    if (event.repeat && (key === " " || key === "Enter" || KEYED[key] !== undefined)) {
+      event.preventDefault();
+      return;
+    }
 
     // `za` folds, the way it folds in vim. A `z` followed by anything else is
     // dropped and the key after it runs as itself, so a stray `z` costs no `j`.
@@ -191,7 +202,21 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
 
     const rating = KEYED[key];
     if (rating !== undefined) controls.current?.rate(rating);
-    else if (key === " " || key === "Enter") controls.current?.reveal();
+    // Once the answer is revealed, the same key grades it Good: the default
+    // button, so a reader who knows the answer goes through the card in two
+    // presses. A whole note is shown from the start with nothing to reveal, so
+    // its Space does nothing rather than grading a card nobody has looked at.
+    // With a button or link under the focus, its own Space and Enter are the
+    // ones that answer, so the pane grades nothing and only stops the key.
+    else if (key === " " || key === "Enter") {
+      const focused = document.activeElement;
+      const onControl =
+        (focused instanceof HTMLButtonElement || focused instanceof HTMLAnchorElement) &&
+        panel.current?.contains(focused) === true;
+      if (controls.current?.revealed) {
+        if (!onControl) controls.current.rate("good");
+      } else if (!controls.current?.shown) controls.current?.reveal();
+    }
     // Before the reveal as well as after it, because a card you want out of the
     // deck is one you have recognised from its question alone.
     else if (key === "s") controls.current?.suspend();
@@ -229,6 +254,7 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
           deck={screen.deck}
           onLeave={() => setScreen({ at: "decks" })}
           onControls={onControls}
+          onOpen={onOpen}
         />
       )}
     </section>

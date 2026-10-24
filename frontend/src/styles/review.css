@@ -1,0 +1,32 @@
+/* The blank of a cloze, drawn as a small grey pill so it reads as a place to
+   answer rather than a pair of brackets in the sentence. */
+.review-gap {
+  background: var(--k-surface);
+  color: var(--k-muted);
+  border-radius: 999px;
+  padding: 0 0.45em;
+  font-family: var(--k-sans);
+  font-size: 0.7em;
+  vertical-align: 0.12em;
+}
+
+/* CodeMirror pads each line at its sides, which set the question and the answer
+   six pixels right of the rule above them. The card's own edge is the line, so
+   the padding goes. */
+.review-front .cm-line,
+.review-back .cm-line {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* The preview paints the page colour behind its text, which shows as a grey
+   strip on the paper card a phone draws. The card is the ground here. */
+[data-testid="review-swipe"] .cm-editor {
+  background-color: transparent;
+}
+
+/* The question is set in the serif face. The preview's own scroller carries the
+   sans face, so it is set again here, one class deeper than that rule. */
+.review-front .cm-editor .cm-scroller {
+  font-family: var(--k-serif);
+}
