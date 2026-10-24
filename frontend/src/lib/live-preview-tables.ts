@@ -1,11 +1,80 @@
 import type { EditorState } from "@codemirror/state";
 import { Decoration, type EditorView, WidgetType } from "@codemirror/view";
 import type { SyntaxNode } from "@lezer/common";
-import { isBlockRevealed, type Walk } from "@/lib/live-preview-hidden";
+import { isBlockRevealed, isLineRevealed, type Walk } from "@/lib/live-preview-hidden";
 import { pictureElement } from "@/lib/live-preview-images";
+import { INLINE } from "@/lib/live-preview-inline";
 import { rowSpans, type Span } from "@/lib/live-preview-table-cells";
 import { repeats } from "@/lib/presses";
 import { type Align, alignsOf, isRow } from "@/lib/table";
+import { isCodeToken, isDashes, isNumericColumn } from "@/lib/table-kinds";
+import { notePath } from "@/lib/todo-commands";
+
+/**
+ * The scroll place of each table that was drawn, kept per editor and keyed by
+ * the note and where the table starts.
+ *
+ * The widget is taken off the page whenever the cursor goes in to show its
+ * source, and a new one is built when it comes out. Without this the sideways
+ * scroll would go back to the start each time. Keyed by the note too, since two
+ * notes with a table at the same offset would otherwise open each other's scroll.
+ */
+const scrolled = new WeakMap<EditorView, Map<string, number>>();
+/**
+ * The observer each drawn table holds, and the place its scroll goes back to,
+ * kept so `destroy` can let the observer go and save the scroll.
+ */
+const watching = new WeakMap<
+  HTMLElement,
+  { observer: ResizeObserver; place: Map<string, number>; key: string }
+>();
+
+/** The text a cell shows, or null for a cell that holds a picture, which is never a number or code. */
+function textOf(spans: Span[]): string | null {
+  if (spans.some((span) => span.image)) return null;
+  return spans.map((span) => span.text).join("");
+}
+
+/**
+ * Keeps the edge shadows and the sticky first column true to the scroller.
+ *
+ * Read off the scroll and the box, so a resize, a change in the table's width
+ * and a scroll all land on the same numbers. The first column's width is set as
+ * a property so the left shadow can sit at its right edge.
+ */
+function watchTable(
+  block: HTMLElement,
+  scroller: HTMLElement,
+  place: Map<string, number>,
+  key: string,
+): void {
+  let restore = place.get(key);
+  const measure = (): void => {
+    const { scrollLeft, scrollWidth, clientWidth } = scroller;
+    block.toggleAttribute("data-shadow-left", scrollLeft > 0);
+    block.toggleAttribute("data-shadow-right", scrollLeft + clientWidth < scrollWidth - 1);
+    // A first column wider than half the box would leave the scroll nothing to
+    // show, so it scrolls with the rest rather than sticking.
+    const first = scroller.querySelector<HTMLElement>("tr > :first-child");
+    const width = first?.offsetWidth ?? 0;
+    const wide = width * 2 > clientWidth;
+    block.toggleAttribute("data-first-wide", wide);
+    block.style.setProperty("--k-table-first", wide ? "0px" : `${width}px`);
+  };
+  // Set once the table has a layout, as a widget is not yet on the page when
+  // it is built and a scroll set before then does nothing.
+  const observer = new ResizeObserver(() => {
+    if (restore !== undefined) {
+      scroller.scrollLeft = restore;
+      restore = undefined;
+    }
+    measure();
+  });
+  observer.observe(scroller);
+  observer.observe(scroller.firstElementChild as Element);
+  scroller.addEventListener("scroll", measure, { passive: true });
+  watching.set(block, { observer, place, key });
+}
 
 /**
  * A table, drawn as a table.
@@ -18,14 +87,27 @@ import { type Align, alignsOf, isRow } from "@/lib/table";
 class TableGrid extends WidgetType {
   private readonly rows: Span[][][];
   private readonly aligns: Align[];
+  /** Where the table starts, the key its scroll place is kept under. */
+  private readonly from: number;
   /** What `eq` compares, the rows being a fresh array on every build. */
   private readonly key: string;
 
-  constructor(rows: Span[][][], aligns: Align[]) {
+  constructor(rows: Span[][][], aligns: Align[], from: number) {
     super();
     this.rows = rows;
     this.aligns = aligns;
+    this.from = from;
     this.key = JSON.stringify([rows, aligns]);
+  }
+
+  override destroy(dom: HTMLElement): void {
+    const scroller = dom.querySelector<HTMLElement>(".cm-table-scroll");
+    const drawn = watching.get(dom);
+    if (drawn !== undefined && scroller !== null) {
+      drawn.place.set(drawn.key, scroller.scrollLeft);
+    }
+    drawn?.observer.disconnect();
+    watching.delete(dom);
   }
 
   override eq(other: TableGrid): boolean {
@@ -126,17 +208,43 @@ class TableGrid extends WidgetType {
       // followed the same address, as on the picture's own click (#572).
       if (!repeats(event, address)) window.open(address, "_blank", "noopener");
     });
-    const table = block.appendChild(document.createElement("table"));
+    // The sideways scroll is on the inner box, so the block keeps the listeners
+    // and the shadows, which sit at its edges outside the scroll.
+    const scroller = block.appendChild(document.createElement("div"));
+    scroller.className = "cm-table-scroll";
+    const table = scroller.appendChild(document.createElement("table"));
     table.className = "cm-table-grid";
     const head = table.createTHead();
     const body = table.createTBody();
+
+    // A column is numeric when its body says so. The head is left out, as it
+    // is words in every column, and an explicit colon in the dashes wins.
+    const width = Math.max(0, ...this.rows.map((cells) => cells.length));
+    const numeric = Array.from({ length: width }, (_, column) =>
+      isNumericColumn(this.rows.slice(1).map((cells) => textOf(cells[column] ?? []) ?? "")),
+    );
 
     this.rows.forEach((cells, index) => {
       const row = (index === 0 ? head : body).insertRow();
       cells.forEach((spans, column) => {
         const cell = row.appendChild(document.createElement(index === 0 ? "th" : "td"));
-        const align = this.aligns[column] ?? "none";
+        const explicit = this.aligns[column] ?? "none";
+        const align = explicit !== "none" ? explicit : numeric[column] ? "right" : "none";
         if (align !== "none") cell.style.textAlign = align;
+        if (numeric[column]) cell.classList.add("cm-table-numeric");
+        if (index > 0) {
+          // An empty cell draws its dash from the stylesheet, so the dash is in
+          // no text and a copy of the cell gets nothing.
+          const text = textOf(spans);
+          if (text === "") cell.classList.add("cm-table-empty");
+          // A dash the writer typed reads as the muted dash of an empty cell.
+          if (text !== null && isDashes(text)) cell.classList.add("cm-table-blank");
+          // A cell that is one code span, or one token that reads as a code name.
+          const wholeCode = spans.length === 1 && spans[0]?.class === INLINE.InlineCode?.class;
+          if (wholeCode || (text !== null && isCodeToken(text))) {
+            cell.classList.add("cm-table-code");
+          }
+        }
         for (const span of spans) {
           if (span.image) {
             const image = cell.appendChild(pictureElement(view, span.image));
@@ -156,6 +264,9 @@ class TableGrid extends WidgetType {
         }
       });
     });
+    const place = scrolled.get(view) ?? new Map<string, number>();
+    scrolled.set(view, place);
+    watchTable(block, scroller, place, `${view.state.facet(notePath) ?? ""}:${this.from}`);
     return block;
   }
 }
@@ -190,7 +301,23 @@ function tableGrid(state: EditorState, table: SyntaxNode, end: number): TableGri
     }
     rows.push(rowSpans(state, child));
   }
-  return new TableGrid(rows, aligns);
+  return new TableGrid(rows, aligns, table.from);
+}
+
+/**
+ * The caption under a table: a line starting `Table: ` straight under its last
+ * row, with no blank line between. The prefix is hidden where the line is drawn,
+ * and shown as written while the cursor is on the line.
+ */
+const CAPTION = "Table: ";
+
+function drawCaption(walk: Walk, last: number): void {
+  const { state, decorations } = walk;
+  if (last >= state.doc.lines) return;
+  const line = state.doc.line(last + 1);
+  if (!line.text.startsWith(CAPTION)) return;
+  decorations.push(Decoration.line({ class: "cm-table-caption" }).range(line.from));
+  if (!isLineRevealed(state, line)) walk.hide(line.from, line.from + CAPTION.length);
 }
 
 /**
@@ -207,6 +334,7 @@ export function drawTable(walk: Walk, table: SyntaxNode): void {
   // A block widget has to cover whole lines. A table nested in a list is
   // indented past the start of its first one, and shows its source.
   const whole = table.from === first.from;
+  drawCaption(walk, last.number);
 
   if (!inside && whole) {
     decorations.push(

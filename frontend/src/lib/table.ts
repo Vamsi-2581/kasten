@@ -1,4 +1,4 @@
-import type { Text } from "@codemirror/state";
+import type { ChangeSpec, Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 
 /**
@@ -29,13 +29,20 @@ const DASHES = /^:?-+:?$/;
 /** The narrowest a column can be drawn and still leave a legal `---`. */
 const MIN_WIDTH = 3;
 
+/**
+ * What pads a cell: spaces and tabs only. `trim()` would also take a no-break
+ * or an ideographic space, which the writer typed as text and which must come
+ * through a line-up as it went in.
+ */
+const PADDING = /^[ \t]+|[ \t]+$/g;
+
 /** Its cells, trimmed, with the outer walls dropped. */
 function cellsOf(text: string): string[] {
   const inner = text
-    .trim()
+    .replace(PADDING, "")
     .replace(/^\|/, "")
     .replace(/(?<!\\)\|$/, "");
-  return inner.split(WALLS).map((cell) => cell.trim());
+  return inner.split(WALLS).map((cell) => cell.replace(PADDING, ""));
 }
 
 /** Whether a line is a row of a table: a line carrying a cell wall. */
@@ -43,8 +50,20 @@ export function isRow(text: string): boolean {
   return WALL.test(text);
 }
 
+/**
+ * Whether a line is the row of dashes under a head.
+ *
+ * Read with `trim()`, not the padding `cellsOf` takes: the tree reads a no-break
+ * or an ideographic space beside a dash as whitespace, so the row is a divider
+ * there too.
+ */
 function isDivider(text: string): boolean {
-  const cells = cellsOf(text);
+  const cells = text
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/(?<!\\)\|$/, "")
+    .split(WALLS)
+    .map((cell) => cell.trim());
   return cells.length > 0 && cells.every((cell) => DASHES.test(cell));
 }
 
@@ -180,6 +199,66 @@ function draw(grid: Grid, widths: number[]): string {
 export function alignTable(doc: Text, run: TableRun): string {
   const grid = readGrid(doc, run);
   return draw(grid, columnWidths(grid));
+}
+
+/**
+ * The edits that take a table's lines to where `alignTable` draws them.
+ *
+ * Kept as small as they can be. A line that differs only in spaces gets spaces
+ * put in or taken out, so a cursor in a cell still sits on the character it sat
+ * on. Any other difference replaces only the middle of the line, so the text of
+ * a cell, its escapes and its dashes come through as they were typed.
+ */
+export function lineUpChanges(doc: Text, run: TableRun): ChangeSpec[] {
+  const changes: ChangeSpec[] = [];
+  alignTable(doc, run)
+    .split("\n")
+    .forEach((want, index) => {
+      const line = doc.line(run.first + index);
+      const old = line.text;
+      if (want === old) return;
+
+      if (old.replace(/ /g, "") === want.replace(/ /g, "")) {
+        changes.push(...spacesBetween(line.from, old, want));
+        return;
+      }
+      let head = 0;
+      while (head < old.length && head < want.length && old[head] === want[head]) head++;
+      let tail = 0;
+      while (
+        tail < old.length - head &&
+        tail < want.length - head &&
+        old[old.length - 1 - tail] === want[want.length - 1 - tail]
+      ) {
+        tail++;
+      }
+      changes.push({
+        from: line.from + head,
+        to: line.from + old.length - tail,
+        insert: want.slice(head, want.length - tail),
+      });
+    });
+  return changes;
+}
+
+/** The space-only edits from `old` to `want`, which have the same non-spaces. */
+function spacesBetween(from: number, old: string, want: string): ChangeSpec[] {
+  const changes: ChangeSpec[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < old.length || j < want.length) {
+    if (i < old.length && j < want.length && old[i] === want[j]) {
+      i++;
+      j++;
+    } else if (j < want.length && want[j] === " ") {
+      changes.push({ from: from + i, insert: " " });
+      j++;
+    } else {
+      changes.push({ from: from + i, to: from + i + 1 });
+      i++;
+    }
+  }
+  return changes;
 }
 
 /** Which cell a position on a row falls in, counting the walls to its left. */
