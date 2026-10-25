@@ -141,6 +141,8 @@
 .cm-log-button {
   display: grid;
   justify-items: start;
+  /* Rows stay at their own height, so a button with no meter keeps its value line level with its neighbours'. */
+  align-content: start;
   gap: 2px;
   text-align: left;
 }
@@ -240,6 +242,11 @@
 
 .cm-log-why:empty {
   display: none;
+}
+
+/* The card asking for a number is a question, not a refusal, so it is the muted text and not the warn colour. */
+.cm-log-ask {
+  color: var(--k-muted);
 }
 
 /* A goal's total in words. A met floor is green with a tick. A passed max is the

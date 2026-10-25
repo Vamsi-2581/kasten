@@ -8,6 +8,7 @@ import {
 } from "@/components/food-sheet";
 import { type Editing, EntryList, MEALS, Reading } from "@/components/log-pane-rows";
 import { type Day, foodTotal, type Line, LogTrends, totalOf } from "@/components/log-trends";
+import { hintOf, WeightRows, weightButton } from "@/components/log-weight";
 import { fetchNote, NoteMissing } from "@/lib/api";
 import { shiftDay } from "@/lib/clock";
 import { fetchLog } from "@/lib/food-api";
@@ -25,6 +26,7 @@ import {
   parseConfig,
 } from "@/lib/log-kinds";
 import type { DrinkTotals } from "@/lib/log-lines";
+import { rangeDates } from "@/lib/log-weight";
 import { useLeader } from "@/lib/use-leader";
 import type { LogActions } from "@/lib/use-log-actions";
 import { useViewport } from "@/lib/use-viewport";
@@ -86,6 +88,9 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
   const [editing, setEditing] = useState<Editing | null>(null);
   const [range, setRange] = useState<Range>(30);
   const [amount, setAmount] = useState("");
+  // The last kind whose button asked for its number. The amount field then takes it: its
+  // placeholder reads `weight in kg`, and Enter in the field presses that kind's button.
+  const [asking, setAsking] = useState<LogKind | null>(null);
   const [tab, setTab] = useState<Tab>("today");
   const { narrow } = useViewport();
   const id = useId();
@@ -220,6 +225,7 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
     setDay(next);
     setCursor(0);
     setEditing(null);
+    setAsking(null);
     closeFood();
   }
 
@@ -270,13 +276,23 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
   }
 
   function tapKind(kind: LogKind) {
+    // A press of another kind ends the ask. A refused amount keeps it, as the card's does.
+    if (asking !== null && asking.mark !== kind.mark) setAsking(null);
     const line = kindLine(kind, amount);
     if (typeof line !== "string") {
       onNotice(line.why);
+      // A last kind has no default to write, so the amount field takes the number.
+      if (line.ask === true) {
+        setAsking(kind);
+        amountField.current?.focus();
+      }
       return;
     }
     void actions.addLine(day, line).then((ok) => {
-      if (ok) setAmount("");
+      if (ok) {
+        setAmount("");
+        setAsking(null);
+      }
     });
   }
 
@@ -353,14 +369,17 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
     event.preventDefault();
   }
 
+  const weightKinds = config.kinds.filter((kind) => kind.last === true);
+  const weightDates = rangeDates(from, range);
   const totals = config.kinds.map((kind) => {
-    const total = totalOf(kind, entryDay);
     const grams =
       kind.builtin === "alcohol" && (entryDay?.totals.alcohol.grams ?? 0) > 0
         ? `, ${entryDay?.totals.alcohol.grams} g`
         : "";
     const unit = kind.builtin === "water" ? "ml" : kind.unit;
-    return { kind, total, tail: `${unit === "" ? "" : ` ${unit}`}${grams}` };
+    const tail = `${unit === "" ? "" : ` ${unit}`}${grams}`;
+    if (kind.last !== true) return { kind, total: totalOf(kind, entryDay), tail, words: undefined };
+    return { kind, tail, ...weightButton(kind, weightDates, trend ?? [], entryDay, tail) };
   });
 
   // The card's builders draw the buttons, mounted here by hand. It runs on every render, so the
@@ -374,8 +393,8 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
     // or a keyboard press on it would leave the pane's keys with nothing to reach them.
     const focused = Array.from(box.children).indexOf(document.activeElement as Element);
     box.replaceChildren(
-      ...totals.map(({ kind, total, tail }) =>
-        quickButton(kind, total, tail, () => tapKindRef.current(kind)),
+      ...totals.map(({ kind, total, tail, words }) =>
+        quickButton(kind, total, tail, () => tapKindRef.current(kind), words),
       ),
       foodButton(() => openFoodRef.current()),
     );
@@ -455,16 +474,18 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
             </h2>
             {dayError ? <p role="alert">{messageOf(dayError)}</p> : null}
             <ul className="log-pane-readings">
-              {totals.map(({ kind, total, tail }) => (
-                <Reading
-                  key={kind.mark}
-                  name={capital(kind.name)}
-                  meter={kind.name}
-                  total={total}
-                  tail={tail}
-                  goal={kind.goal}
-                />
-              ))}
+              {totals.map(({ kind, total, tail }) =>
+                kind.last === true || total === null ? null : (
+                  <Reading
+                    key={kind.mark}
+                    name={capital(kind.name)}
+                    meter={kind.name}
+                    total={total}
+                    tail={tail}
+                    goal={kind.goal}
+                  />
+                ),
+              )}
               {FOOD.map(({ field, unit }) => (
                 <Reading
                   key={field}
@@ -475,11 +496,7 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
                   goal={config.food[field]}
                 />
               ))}
-              <li className="log-pane-reading log-pane-slot" data-slot="weight">
-                <span className="log-pane-name">Weight</span>
-                <span className="log-pane-total">—</span>
-                <span className="log-pane-goal">no weigh-ins yet</span>
-              </li>
+              <WeightRows kinds={weightKinds} dates={weightDates} days={trend ?? []} />
             </ul>
 
             <section aria-label="Add" className="log-pane-add cm-log-row">
@@ -488,9 +505,14 @@ export function LogPane({ commands, onOpen, focusSignal, today, actions, onNotic
                 ref={amountField}
                 className="cm-log-amount"
                 aria-label="Amount"
-                placeholder="amount"
+                placeholder={asking === null ? "amount" : hintOf(asking)}
                 value={amount}
                 onChange={(event) => setAmount(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || asking === null) return;
+                  event.preventDefault();
+                  tapKind(asking);
+                }}
               />
             </section>
 
