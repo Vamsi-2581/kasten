@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type RefObject, useEffect } from "react";
 import { LOG_NOTE } from "@/lib/layout";
 import { reloadLogConfig } from "@/lib/log-card";
-import { dailyDate } from "@/lib/periodic";
+import { dailyDate, weeklyWeek, yearlyYear } from "@/lib/periodic";
 import { pressEcho } from "@/lib/todo-press-echo";
 import type { useAutosave } from "@/lib/use-autosave";
 import { parseVaultEvent } from "@/lib/vault-events";
@@ -73,6 +73,7 @@ export function useVaultEvents(
       const nowListed = listingOf(answer);
       if (listed !== undefined && nowListed !== listed) {
         queryClient.invalidateQueries({ queryKey: ["written"] }, { cancelRefetch: false });
+        queryClient.invalidateQueries({ queryKey: ["written-notes"] }, { cancelRefetch: false });
       }
       listed = nowListed;
     });
@@ -207,6 +208,17 @@ export function useVaultEvents(
         (dailyDate(event.path) !== null || event.path === LOG_NOTE)
       ) {
         queryClient.invalidateQueries({ queryKey: ["log"] }, { cancelRefetch: false });
+      }
+      // The review's notes carry tags and projects, which another note's write can change, so a
+      // write or removal asks them again, the open note's own autosave included: a tag typed into
+      // the note on screen must reach the review in the other pane. Not a yearly or weekly note: those
+      // are the review's own notes, typed into every second, and the review asks nothing as they are.
+      if (
+        (event.change === "written" || event.change === "removed") &&
+        yearlyYear(event.path) === null &&
+        weeklyWeek(event.path) === null
+      ) {
+        queryClient.invalidateQueries({ queryKey: ["written-notes"] }, { cancelRefetch: false });
       }
       const paths = queryClient.getQueryData<string[]>(["files"]);
       // A removal refetches no note, so the readers of log.md would keep the text
