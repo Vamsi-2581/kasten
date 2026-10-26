@@ -3,6 +3,7 @@ import { Fragment, useState } from "react";
 import { ReviewImport } from "@/components/review-import";
 import { fetchCards, fetchNote } from "@/lib/api";
 import { readClock } from "@/lib/clock";
+import { readRetry } from "@/lib/read-retry";
 import { type Deck, deckNotes, decksFrom } from "@/lib/review";
 import { dayWords } from "@/lib/review-days";
 import { useEntrance } from "@/lib/stagger";
@@ -93,6 +94,7 @@ export function ReviewDecks({ onPick, onParked, archive = false }: ReviewDecksPr
   const { data: hits, isPending: scanning } = useQuery({
     queryKey: ["cards", archive],
     queryFn: () => fetchCards(archive),
+    ...readRetry,
   });
 
   // Under `cards` rather than `note`, so the invalidation every rating, parking
@@ -104,6 +106,7 @@ export function ReviewDecks({ onPick, onParked, archive = false }: ReviewDecksPr
     queries: paths.map((path) => ({
       queryKey: ["cards", "note", path],
       queryFn: () => fetchNote(path),
+      ...readRetry,
     })),
   });
 
@@ -113,6 +116,8 @@ export function ReviewDecks({ onPick, onParked, archive = false }: ReviewDecksPr
   // Until the last note is in, so a vault of decks never flashes "No decks",
   // and until the limits are. Rows drawn before then count no limit; the
   // sitting waits for the limits itself, so what it asks never rests on that.
+  // A retrying note still holds the summary: its cards are not in yet, so a
+  // summary drawn without them would say "No decks" or count short.
   const isPending = scanning || reads.some((read) => read.isPending) || limits === undefined;
 
   const today = readClock(new Date()).date;
