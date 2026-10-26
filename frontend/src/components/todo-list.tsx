@@ -2,9 +2,10 @@ import { useState } from "react";
 import { TodoHints } from "@/components/todo-hints";
 import { TodoMore } from "@/components/todo-more";
 import { TodoRow } from "@/components/todo-row";
+import { TodoStateBox } from "@/components/todo-state-box";
 import type { SearchHit, TodoHit } from "@/lib/api";
 import { useEntrance } from "@/lib/stagger";
-import { cycleLine, parseTodo, STATE_SYMBOL } from "@/lib/todo";
+import { cycleLine, parseTodo } from "@/lib/todo";
 import { lineSuggestions } from "@/lib/todo-suggest";
 import { type Row, type RowFacts, rowKey } from "@/lib/use-todo-rows";
 
@@ -13,6 +14,16 @@ const STEP = 1.1;
 
 /** The padding `ROW` carries, which a nested row has to start from. */
 const GUTTER = 0.75;
+
+/**
+ * A group heading's face: the label size and tracking the theme sets, in the
+ * muted colour. The fold's button takes the same face, since a button resets
+ * its text transform and would otherwise drop the capitals.
+ */
+const HEADING_TEXT = "font-sans text-k-12 tracking-[var(--k-track-label)] text-k-muted uppercase";
+
+/** A group heading, capped at the width a row is, so its label stays by its rows. */
+const HEADING = `max-w-[52rem] px-3 pt-2 pb-1 ${HEADING_TEXT}`;
 
 /**
  * The list of rows under their headings: the row itself, and on touch the
@@ -40,6 +51,10 @@ export function TodoList(p: {
   onWrite(hit: SearchHit, line: string): void;
   onCycle(hit: SearchHit): void;
   actions(hit: TodoHit): [string, () => void][];
+  /** The rows done in the last seven days, drawn folded at the end of the list. */
+  doneWeek: Row[];
+  doneOpen: boolean;
+  onDoneFold(): void;
 }) {
   const {
     groups,
@@ -60,6 +75,9 @@ export function TodoList(p: {
     onWrite,
     onCycle,
     actions,
+    doneWeek,
+    doneOpen,
+    onDoneFold,
   } = p;
   /**
    * The row whose `⋯` is open, or null: one strip at a time. By its key and
@@ -77,12 +95,13 @@ export function TodoList(p: {
     /* A list that moves under the finger has moved the armed row with it. */
     <div className="flex-1 overflow-auto py-1" onScroll={() => onArm(null)}>
       {empty !== null ? (
-        <p className="px-3 py-1 text-[13px] text-k-muted">{empty}</p>
+        <p className="px-3 py-1 text-k-13 text-k-muted">{empty}</p>
       ) : (
         groups.map(({ heading, rows: group }) => (
           <div key={heading}>
-            <h3 className="px-3 pt-2 pb-1 text-[11px] tracking-wider text-k-muted uppercase">
-              {heading}
+            {/* The count beside the name, so a group reads its size before its rows. */}
+            <h3 className={HEADING}>
+              {heading} {group.length}
             </h3>
             {group.map((row) => {
               const { hit, todo, depth } = row;
@@ -125,7 +144,7 @@ export function TodoList(p: {
                       // row of the list, at the list's size, wearing the
                       // keyboard cursor's own outline, because this row is
                       // where the keys are going.
-                      className="w-full bg-k-accent/15 px-3 py-[3px] text-[13px] text-k-ink outline-2 -outline-offset-1 outline-k-accent pointer-coarse:text-base"
+                      className="w-full bg-k-accent/15 px-3 py-[3px] text-k-13 text-k-ink outline-2 -outline-offset-1 outline-k-accent pointer-coarse:text-base"
                     />
                     <TodoHints
                       found={lineSuggestions(editing.line, today, true)}
@@ -208,13 +227,25 @@ export function TodoList(p: {
                     aria-pressed={asking}
                     data-armed={asking ? "" : undefined}
                     style={indent}
-                    className={`min-h-11 min-w-11 shrink-0 pr-2 text-left text-[13px] ${
+                    className={`flex min-h-11 min-w-11 shrink-0 items-start pr-2 text-left text-k-13 ${
                       asking ? "text-k-accent" : held ? "text-k-muted" : "text-k-ink"
                     }`}
                   >
-                    {asking
-                      ? `${next === undefined ? "" : STATE_SYMBOL[next]}?`
-                      : STATE_SYMBOL[todo.state]}
+                    {/* Top-aligned with the words of the row beside it, as the box on desktop is. */}
+                    {asking ? (
+                      <>
+                        {next === undefined ? null : (
+                          <span className="mt-[3px] flex shrink-0">
+                            <TodoStateBox state={next} />
+                          </span>
+                        )}
+                        ?
+                      </>
+                    ) : (
+                      <span className="mt-[3px] flex shrink-0">
+                        <TodoStateBox state={todo.state} />
+                      </span>
+                    )}
                   </button>
                   <TodoRow
                     row={row}
@@ -233,6 +264,64 @@ export function TodoList(p: {
             })}
           </div>
         ))
+      )}
+      {/* Drawn after the groups even where the list says nothing else, so the
+        week's done work is one tap away on an empty list too. Folded by
+        default: the open work is what a person comes to the list for. */}
+      {doneWeek.length > 0 && (
+        <div>
+          <h3 className={HEADING}>
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-expanded={doneOpen}
+              onClick={onDoneFold}
+              // A full-width button tints on a press, as a row does, rather than scaling.
+              className={`k-row flex w-full items-center gap-1 pointer-coarse:min-h-11 ${HEADING_TEXT}`}
+            >
+              {/* A chevron that turns to point down when open, as the file tree's does. */}
+              <span
+                aria-hidden="true"
+                className={`inline-block transition-transform duration-(--k-hover) ease-(--k-ease-out) motion-reduce:transition-none motion-reduce:duration-0 ${doneOpen ? "rotate-90" : ""}`}
+              >
+                ›
+              </span>
+              Done this week {doneWeek.length}
+            </button>
+          </h3>
+          {doneOpen &&
+            doneWeek.map((row) => {
+              const key = rowKey(row.hit);
+              const indent = { paddingLeft: `${GUTTER + (row.depth ?? 0) * STEP}rem` };
+              const drawn = (
+                <TodoRow
+                  key={key}
+                  row={row}
+                  facts={facts}
+                  today={today}
+                  cursor={key === cursorKey}
+                  muted
+                  coarse={coarse}
+                  indent={indent}
+                  files={files}
+                  onClick={() => onRow(row.hit)}
+                  onPerson={(path) => (picking ? onRow(row.hit) : onPerson(path))}
+                />
+              );
+              // On touch the row has no state button, so its box stands in the
+              // slot the open rows' buttons take, and the two columns line up.
+              // Not a button: a done row has no cycle to answer to.
+              if (!coarse) return drawn;
+              return (
+                <div key={key} className="flex min-w-0 items-start">
+                  <span className="mt-[3px] flex w-11 shrink-0 justify-center">
+                    <TodoStateBox state={row.todo.state} />
+                  </span>
+                  {drawn}
+                </div>
+              );
+            })}
+        </div>
       )}
     </div>
   );
