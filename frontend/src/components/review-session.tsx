@@ -106,6 +106,8 @@ export function ReviewSession({ deck, onLeave, onControls, onOpen }: ReviewSessi
     setTyped,
     done,
     failed,
+    rereadable,
+    reread,
     step,
     undoing,
     reveal,
@@ -405,6 +407,21 @@ export function ReviewSession({ deck, onLeave, onControls, onOpen }: ReviewSessi
           <p role="alert" className="mt-6 text-k-muted">
             {failed}
           </p>
+        )}
+        {rereadable && (
+          // The reread unmounts this button, and a focus on it would fall to the
+          // body and take the pane's keys with it, so the focus goes to the pane first.
+          <button
+            type="button"
+            data-reread
+            onClick={(event) => {
+              event.currentTarget.closest<HTMLElement>("[tabindex]")?.focus();
+              reread();
+            }}
+            className={`mt-3 ${BUTTON}`}
+          >
+            Try again
+          </button>
         )}
       </div>
 

@@ -222,6 +222,17 @@ export function ReviewPane({ commands, onClose, onOpen, focusSignal }: ReviewPan
       const onControl =
         (focused instanceof HTMLButtonElement || focused instanceof HTMLAnchorElement) &&
         panel.current?.contains(focused) === true;
+      // Try again is the one button a sitting draws with no card up, and its own
+      // Enter presses it, so the pane lets that key through for it alone. Any
+      // other focused control keeps its Enter stopped, as it always was.
+      if (
+        focused instanceof HTMLElement &&
+        focused.dataset.reread !== undefined &&
+        !controls.current?.showing &&
+        panel.current?.contains(focused) === true
+      ) {
+        return;
+      }
       if (controls.current?.revealed) {
         if (!onControl) controls.current.rate("good");
       } else if (!controls.current?.shown) controls.current?.reveal();
