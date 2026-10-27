@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publish the next release, its number computed from the commits.
 
-A release is one command on main, with no version bump pull request. The
+A release is one command at the tip of origin/main, with no version bump pull request. The
 version lives in the tag, so this script reads the Conventional Commits since
 the last X.Y.Z tag, picks the bump they call for, and creates the GitHub
 release at HEAD. Publishing the release is what deploys it.
@@ -86,16 +86,33 @@ def next_version(last: Version | None) -> Version | None:
     return (major, minor, patch + 1)
 
 
+def is_ancestor(older: str, newer: str) -> bool:
+    """Return True when the commit `older` is reachable from `newer`."""
+    result = subprocess.run(  # noqa: S603
+        ["git", "merge-base", "--is-ancestor", older, newer],  # noqa: S607
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def check_guards() -> None:
-    """Refuse unless HEAD is the clean tip of main on origin."""
-    if git("rev-parse", "--abbrev-ref", "HEAD") != "main":
-        raise SystemExit("release: not on main")
+    """Refuse unless HEAD is the clean tip of origin/main, on a branch or detached."""
     if git("status", "--porcelain"):
         raise SystemExit("release: working tree is not clean")
     # Fetch before comparing, so origin/main is the one on GitHub right now.
     git("fetch", "--tags", "origin")
-    if git("rev-parse", "HEAD") != git("rev-parse", "origin/main"):
-        raise SystemExit("release: HEAD is not origin/main; push or pull first")
+    head = git("rev-parse", "HEAD")
+    tip = git("rev-parse", "origin/main")
+    if head == tip:
+        return
+    if is_ancestor(head, tip):
+        raise SystemExit("release: HEAD is behind origin/main; fetch and check out origin/main")
+    if is_ancestor(tip, head):
+        raise SystemExit(
+            "release: HEAD is ahead of origin/main; merge it through a pull request first"
+        )
+    raise SystemExit("release: HEAD has diverged from origin/main; check out origin/main")
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
