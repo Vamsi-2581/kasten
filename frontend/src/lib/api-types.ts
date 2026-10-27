@@ -1218,10 +1218,13 @@ export interface paths {
         };
         /**
          * Read Tokens
-         * @description Every agent token the store holds, by name and creation date.
+         * @description Every agent token the store holds, by name, creation date and last use.
          *
          *     Never a digest and never a secret. Only the digest is kept at all, so there
          *     is no way back to a secret from here even by mistake.
+         *
+         *     The list still answers when no database does: `last_used` is then null, and
+         *     a warning says why.
          */
         get: operations["read_tokens_api_tokens_get"];
         put?: never;
@@ -1239,6 +1242,29 @@ export interface paths {
          *     retype it and has to know which it was.
          */
         post: operations["create_token_api_tokens_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tokens/{name}/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Token Actions
+         * @description The newest requests one token made, newest first, at most fifty.
+         *
+         *     503 rather than an empty list when no database answers, since an empty list
+         *     would say the token had done nothing.
+         */
+        get: operations["read_token_actions_api_tokens__name__actions_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -5731,17 +5757,31 @@ export interface components {
             shared: boolean;
         };
         /**
-         * Token
-         * @description One token as anything but the mint may see it.
+         * TokenAction
+         * @description One request a token made, as the activity list shows it.
+         *
+         *     Named `TokenAction` in the schema, which is the name the API reference uses.
          */
-        Token: {
-            /** Name */
-            name: string;
+        TokenActionRead: {
             /**
-             * Created
+             * At
              * Format: date-time
              */
-            created: string;
+            at: string;
+            /** Client */
+            client: string | null;
+            /** Method */
+            method: string;
+            /** Path */
+            path: string;
+            /** Tool */
+            tool: string | null;
+            /** Note */
+            note: string | null;
+            /** Status */
+            status: number;
+            /** Outcome */
+            outcome: string;
         };
         /**
          * TokenName
@@ -5750,6 +5790,21 @@ export interface components {
         TokenName: {
             /** Name */
             name: string;
+        };
+        /**
+         * TokenUse
+         * @description One token as the list shows it, with the time of its newest request.
+         */
+        TokenUse: {
+            /** Name */
+            name: string;
+            /**
+             * Created
+             * Format: date-time
+             */
+            created: string;
+            /** Last Used */
+            last_used?: string | null;
         };
         /**
          * Totals
@@ -7545,7 +7600,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Token"][];
+                    "application/json": components["schemas"]["TokenUse"][];
                 };
             };
         };
@@ -7570,6 +7625,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Minted"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_token_actions_api_tokens__name__actions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenActionRead"][];
                 };
             };
             /** @description Validation Error */
