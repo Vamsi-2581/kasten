@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fetchBook, importAnki, importAnkiLink, UPLOAD_LIMIT_BYTES, uploadAsset } from "@/lib/api";
+import { fetchBook, UPLOAD_LIMIT_BYTES, uploadAsset } from "@/lib/api";
+import { PIECE, uploads } from "./upload-backend-fixture";
 
 const FILES = readFileSync(
   path.join(import.meta.dirname, "../../backend/src/kasten_backend/files.py"),
@@ -15,43 +16,6 @@ function backendCap(): number {
 }
 
 /** One piece, the most a single request carries. */
-const PIECE = 10 * 1024 * 1024;
-
-/**
- * The backend behind the upload routes, and every request sent to it in order.
- *
- * Each entry of `pieces` answers one PUT in turn: "drop" as a lost connection,
- * a number as that status. Past the last entry a PUT lands. A request reads as
- * its method, its URL and what it carried.
- */
-function uploads(pieces: ("drop" | number)[] = []) {
-  const sent: string[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string, init?: RequestInit) => {
-      const body = init?.body;
-      const carried =
-        body instanceof Blob ? ` ${body.size} bytes` : typeof body === "string" ? ` ${body}` : "";
-      sent.push(`${init?.method} ${url}${carried}`);
-      if (url === "/api/uploads") {
-        return { ok: true, status: 201, json: async () => ({ id: "u1" }) };
-      }
-      const answer = init?.method === "PUT" ? pieces.shift() : undefined;
-      // What `fetch` itself throws when the connection drops.
-      if (answer === "drop") throw new TypeError("Failed to fetch");
-      if (answer !== undefined && answer >= 300) {
-        return {
-          ok: false,
-          status: answer,
-          headers: new Headers({ "content-type": "application/json" }),
-          json: async () => ({ detail: `The backend answered ${answer}` }),
-        };
-      }
-      return { ok: true, status: 201, json: async () => ({}) };
-    }),
-  );
-  return sent;
-}
 
 describe("fetchBook", () => {
   afterEach(() => {
@@ -233,82 +197,6 @@ describe("uploadAsset", () => {
       turned: new Error("The backend answered 409"),
       refused: [`POST /api/uploads {"size":${PIECE + 1}}`, `PUT /api/uploads/u1/0 ${PIECE} bytes`],
     });
-  });
-});
-
-describe("importAnki", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("asks for Anki's schedule only when told to", async () => {
-    const posting = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
-    vi.stubGlobal("fetch", posting);
-    const deck = new Blob(["apkg"]);
-
-    await importAnki(deck, false);
-    expect(posting).toHaveBeenLastCalledWith("/api/anki", { method: "POST", body: deck });
-
-    await importAnki(deck, true);
-    expect(posting).toHaveBeenLastCalledWith("/api/anki?carry=true", {
-      method: "POST",
-      body: deck,
-    });
-  });
-
-  it("#521 A3 sends a deck over one piece in parts and imports it by its id", async () => {
-    const sent = uploads();
-
-    await importAnki(new Blob([new Uint8Array(PIECE)]), false);
-    await importAnki(new Blob([new Uint8Array(PIECE + 1)]), true);
-
-    expect(sent).toEqual([
-      `POST /api/anki ${PIECE} bytes`,
-      `POST /api/uploads {"size":${PIECE + 1}}`,
-      `PUT /api/uploads/u1/0 ${PIECE} bytes`,
-      "PUT /api/uploads/u1/1 1 bytes",
-      "POST /api/anki?carry=true&upload=u1",
-    ]);
-  });
-});
-
-describe("importAnkiLink", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  const LINK = "https://ankiweb.net/shared/info/1104981491";
-
-  it("A2 posts the link as JSON, asking for Anki's schedule only when told to", async () => {
-    const posting = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
-    vi.stubGlobal("fetch", posting);
-    const sent = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: LINK }),
-    };
-
-    await importAnkiLink(LINK, false);
-    expect(posting).toHaveBeenLastCalledWith("/api/anki/link", sent);
-
-    await importAnkiLink(LINK, true);
-    expect(posting).toHaveBeenLastCalledWith("/api/anki/link?carry=true", sent);
-  });
-
-  it("A7 carries the backend's sentence out of a refusal word for word", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({
-        ok: false,
-        status: 422,
-        headers: new Headers({ "content-type": "application/json" }),
-        json: async () => ({ detail: "That page holds no shared deck" }),
-      }),
-    );
-
-    await expect(importAnkiLink(LINK, false)).rejects.toThrow(
-      new Error("That page holds no shared deck"),
-    );
   });
 });
 

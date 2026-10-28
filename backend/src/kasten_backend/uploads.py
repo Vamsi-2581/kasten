@@ -57,6 +57,8 @@ class _Upload:
     """Where each piece received so far begins in the temp."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """Held for a piece and for the finish, so two requests cannot interleave bytes."""
+    kept: bool = False
+    """Whole and kept by `taken` after its use failed, for a retry that may never come."""
 
 
 _uploads: dict[str, _Upload] = {}
@@ -121,6 +123,16 @@ def start(folder: Path, size: int) -> str:
     sweep()
     # After the sweep, so an upload abandoned an hour ago holds no room.
     room = files.OPEN_LIMIT_BYTES
+    # A file kept for a retry gives way to one being sent: the retry can send
+    # it again, and before the retry was kept a finished upload held no room.
+    # Only when that is enough: a kept file dropped for a 507 anyway is lost for nothing.
+    spare = [key for key, held in _uploads.items() if held.kept and not held.lock.locked()]
+    live = sum(upload.size for key, upload in _uploads.items() if key not in spare)
+    if live + size <= room:
+        for old in spare:
+            if sum(upload.size for upload in _uploads.values()) + size <= room:
+                break
+            _drop(old)
     if sum(upload.size for upload in _uploads.values()) + size > room:
         raise RefusedError(507, f"Too much is already uploading: {amount(room)} at once")
 
@@ -198,6 +210,42 @@ async def finished(key: str) -> AsyncIterator[Path]:
             yield upload.path
         finally:
             _drop(key)
+
+
+@asynccontextmanager
+async def taken(key: str) -> AsyncIterator[Path]:
+    """The joined file of upload `key`, gone once the block ends well and kept if it raises.
+
+    For the Anki import, whose refusal or failure the reader may answer by
+    finishing the same upload again: what took minutes to send stays for that.
+    A file that never reached the block, unknown, gone or short, is dropped as
+    `finished` drops it. One kept has its mtime set to now, so the sweep gives
+    the retry a full `UPLOAD_IDLE_SECONDS` from the failure, not from the last
+    piece. The lock is held throughout, so the sweep skips it meanwhile.
+    """
+    upload = _find(key)
+    async with upload.lock:
+        if _uploads.get(key) is not upload:
+            raise RefusedError(404, "No such upload")
+        if not upload.path.is_file():
+            _drop(key)
+            raise RefusedError(404, "No such upload")
+        if upload.path.stat().st_size != upload.size:
+            _drop(key)
+            raise RefusedError(409, "That upload is not finished")
+        landed = False
+        try:
+            yield upload.path
+            landed = True
+        finally:
+            if landed:
+                _drop(key)
+            else:
+                # A cancel keeps it too: shutdown cancels an import, and `wipe`
+                # at the next start clears what this keeps.
+                upload.kept = True
+                with contextlib.suppress(OSError):
+                    upload.path.touch()
 
 
 async def read(path: Path) -> AsyncIterator[bytes]:
