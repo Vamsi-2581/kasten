@@ -40,7 +40,13 @@ import {
 } from "@/lib/graph/graph-clusters";
 import type { GraphMode } from "@/lib/graph/graph-mode";
 import { areasOf, paintDiscs, paintNames, ringed } from "@/lib/graph/graph-paint";
-import { FINGER, FIT_PADDING, type GraphView, NAMES_FULL, zoomsOf } from "@/lib/graph/graph-zoom";
+import {
+  hitRadius,
+  type PinchOverDrag,
+  pinchOverDrag,
+  radialHitRadius,
+} from "@/lib/graph/graph-touch";
+import { FIT_PADDING, type GraphView, NAMES_FULL, zoomsOf } from "@/lib/graph/graph-zoom";
 import { onThemeChange } from "@/lib/theme";
 
 export interface GraphCanvasHandlers {
@@ -90,18 +96,6 @@ const DIMMED = 0.15;
 const PLAIN_LINK = 0.5;
 
 /**
- * How far from a note's middle a press still counts as on it, in graph units.
- *
- * The dot and a little more for a mouse. A dot is a few pixels wide however
- * far out the zoom is, which a finger cannot hit, so for one the area never
- * shrinks below `FINGER` on screen.
- */
-export function hitRadius(degree: number, scale: number, coarse: boolean): number {
-  const drawn = radiusOf(degree) + 2;
-  return coarse ? Math.max(drawn, FINGER / 2 / scale) : drawn;
-}
-
-/**
  * The dot radii of a radial drawing, in CSS pixels: the middle note, the first
  * ring and every ring after. Zoom is fixed there, so these are on screen as
  * they are written.
@@ -116,12 +110,6 @@ const OUTER_DOT = 3.5;
  */
 const RING_GAP = 2.5;
 const RING_WIDTH = 1.5;
-
-/** The hit area of a radial note: the dot plus 2, and half a finger on a touch screen. */
-function radialHitRadius(dot: number, coarse: boolean): number {
-  const drawn = dot + 2;
-  return coarse ? Math.max(drawn, FINGER / 2) : drawn;
-}
 
 /** A theme variable's value, read until the theme changes. */
 function themed(variable: string): string {
@@ -398,8 +386,12 @@ export function drawGraph(
         node ? { node, ...graph.graph2ScreenCoords(node.x ?? 0, node.y ?? 0) } : null,
       );
     })
-    .onNodeClick((node) => handlers.onOpen(node))
-    .onBackgroundClick(() => handlers.onBlank())
+    .onNodeClick((node) => {
+      if (!touch.pinched()) handlers.onOpen(node);
+    })
+    .onBackgroundClick(() => {
+      if (!touch.pinched()) handlers.onBlank();
+    })
     .onRenderFramePre(underNotes)
     .onRenderFramePost(overNotes)
     // Fitted once the cluster has settled, so the areas fill the pane. A plain
@@ -414,6 +406,7 @@ export function drawGraph(
     });
 
   const zooms = zoomsOf(graph, handlers.coarse);
+  let touch: PinchOverDrag = { pinched: () => false, stop: () => {} };
 
   // What force-graph sets by default, kept so cluster(null) can put it back.
   const defaults = {
@@ -441,6 +434,7 @@ export function drawGraph(
     graph
       .onZoom((transform) => handlers.onZoom?.(transform.k))
       .onZoomEnd(() => graph.nodePointerAreaPaint(paintArea));
+    touch = pinchOverDrag(element, graph);
   }
 
   // A theme switch changes no node, so the canvas repaints on the next frame
@@ -509,6 +503,7 @@ export function drawGraph(
     },
     destroy() {
       unlisten();
+      touch.stop();
       graph._destructor();
     },
   };
