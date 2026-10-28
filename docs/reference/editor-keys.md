@@ -14,12 +14,13 @@ Everything in the pages below is what kasten adds on top of vim; every vim bindi
 listed here still does what vim does. [Vim on or off](#vim-on-or-off) says what
 the editor does without it.
 
-Three files in `frontend/src/lib` hold these bindings as tables: the leader in
-`leader-keys.ts`, the keys that act inside the buffer in `editor/buffer-keys.ts`, and
-the terminal, tree and pane keys in `key-bindings.ts`, `reader-keys.ts` and
-`video/video-keys.ts`. Both the registrations
-and the which-key panel and key help are built from them. A test fails if a table names a
-command the app does not provide.
+Six files in `frontend/src/lib` hold these bindings as tables: the leader in
+`leader-keys.ts`, the keys that act inside the buffer in `editor/buffer-keys.ts`, the
+terminal, tree and pane keys in `key-bindings.ts`, the readers' keys in `reader-keys.ts`,
+the video pane's in `video/video-keys.ts` and the finance pane's in
+`finance/finance-keys.ts`. The registrations, the which-key panel and the key help are
+built from them. A test fails if the leader or terminal table names a command the app
+does not provide.
 
 ## Pages
 

@@ -11,7 +11,7 @@ status: stable
 kasten has one design rule, and the rest of the system falls out of it.
 
 > The vault is a directory of `.md` files, and that directory is the source of
-> truth. Postgres holds a derived index only. You must be able to drop the
+> truth. Postgres may hold a derived index only. You must be able to drop the
 > schema and rebuild it from the vault. Nothing that only exists in the
 > database is allowed to matter.
 
@@ -44,8 +44,13 @@ scripts and other editors all keep working.
 
 Some questions are slow against a directory of files and fast against a
 database: full-text search, the backlinks pointing at a note, every note
-carrying a tag. That is what Postgres holds. Documents, links, tags,
-search vectors, all derived.
+carrying a tag. An index of the vault would be for those, and would hold
+documents, links, tags and search vectors, all derived.
+
+None of that is in Postgres today. A search runs ripgrep over the notes on
+every query, which at 10,000 notes takes under 20ms and cannot go stale. The
+backlinks panel is a search for the note's name, and the tag list reads the
+notes too. See [What is not decided yet](#what-is-not-decided-yet).
 
 The test for whether something belongs in the database is simple. If losing it
 would lose information, it does not belong there. Note text, titles and the
