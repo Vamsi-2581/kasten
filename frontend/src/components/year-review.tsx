@@ -18,6 +18,7 @@ import {
 import {
   minutesWords,
   monthCounts,
+  monthsBegun,
   type ProjectRow,
   projectRows,
   topTags,
@@ -38,24 +39,19 @@ export function YearReview({ year }: { year: number }) {
       {range === null ? (
         <Words>{`${year} has not started.`}</Words>
       ) : (
-        <YearBody year={year} from={range.from} to={range.to} today={today} />
+        <YearBody year={year} from={range.from} to={range.to} />
       )}
     </div>
   );
 }
 
-function YearBody({
-  year,
-  from,
-  to,
-  today,
-}: {
-  year: number;
-  from: string;
-  to: string;
-  today: string;
-}) {
+function YearBody({ year, from, to }: { year: number; from: string; to: string }) {
   const reads = useYearReads(from, to);
+  // Read here, as the week review does: a read coming back draws this body again, so with the
+  // review open into a new month that month gets its bar. This year's charts end at today, read
+  // now; `to` is the today of the first draw.
+  const today = readClock(new Date()).date;
+  const end = to.slice(0, 4) === today.slice(0, 4) ? today : to;
   const decks = new Set(deckNotes(reads.cards.data));
   const cards = reads.cards.data.filter((hit) => decks.has(hit.path));
   const todos = reads.todos.data;
@@ -86,7 +82,7 @@ function YearBody({
         <GitHub year={year} to={to} reads={reads} />
         <Months
           year={year}
-          to={to}
+          to={end}
           today={today}
           written={reads.written.data}
           error={reads.written.error}
@@ -94,6 +90,7 @@ function YearBody({
         />
         <ModelUse
           year={year}
+          to={end}
           today={today}
           lines={reads.modelUse.data}
           error={reads.modelUse.error}
@@ -276,12 +273,14 @@ function Months({
 
 function ModelUse({
   year,
+  to,
   today,
   lines,
   error,
   pending,
 }: {
   year: number;
+  to: string;
   today: string;
   lines: ModelUseLine[];
   error: string | undefined;
@@ -313,6 +312,8 @@ function ModelUse({
   const cost = months.reduce((sum, month) => sum + (month.cost ?? 0), 0);
   const priced = lines.some((line) => line.cost !== null);
   const unpriced = unpricedTokens(lines);
+  // A month still to come gets no bar, as on Notes per month; the totals still count every line.
+  const begun = months.slice(0, monthsBegun(to));
   // The same month marking as Notes per month: this year's current month at full strength.
   const todayIndex = today.startsWith(`${year}-`) ? Number(today.slice(5, 7)) - 1 : undefined;
   return (
@@ -322,7 +323,7 @@ function ModelUse({
         <Section heading="Tokens per month">
           <Bars
             label={`tokens per month in ${year}, ${tokenWords(tokens)} in all`}
-            points={months.map((month, index) => ({ index, amount: month.tokens }))}
+            points={begun.map((month, index) => ({ index, amount: month.tokens }))}
             slots={12}
             todayIndex={todayIndex}
           />
@@ -333,7 +334,7 @@ function ModelUse({
           {priced ? (
             <Bars
               label={`cost per month in ${year}, ${costWords(cost)} in all`}
-              points={months.map((month, index) => ({ index, amount: month.cost ?? 0 }))}
+              points={begun.map((month, index) => ({ index, amount: month.cost ?? 0 }))}
               slots={12}
               todayIndex={todayIndex}
             />
