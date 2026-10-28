@@ -19,12 +19,15 @@ import zlib
 from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 from urllib.parse import unquote
 
 import pypdfium2
 
 from kasten_backend.vault import list_assets, list_html
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 MOST_CHARS = 1_000_000
 """How many characters of text are kept per file; the rest of a file is not searched.
@@ -287,8 +290,29 @@ pdfium is not thread safe, and two cold queries would otherwise extract one book
 
 async def refresh(root: Path, cache: Path, skip: str | None) -> None:
     """Bring the cache into step with the book and page files in the vault."""
+    # Shielded: a search whose client goes away is cancelled, but its thread
+    # writes on, and the lock must stay held until that thread is done.
+    await asyncio.shield(_refresh_locked(root, cache, skip))
+
+
+async def _refresh_locked(root: Path, cache: Path, skip: str | None) -> None:
     async with _lock:
         await asyncio.to_thread(_refresh, root, cache, skip)
+
+
+@contextlib.asynccontextmanager
+async def fresh(root: Path, cache: Path, skip: str | None) -> AsyncIterator[None]:
+    """Bring the cache into step, then hold it still while the caller reads it.
+
+    A reader scans an entry's txt and then looks up its json, and an entry is
+    rewritten one half at a time, so a rewrite in between would pair a new line
+    with an old place (#1271). The writers' lock is held over the read. A
+    refresh that gets in before it is taken is harmless: it finishes both
+    halves first, and the read sees the newer entry whole.
+    """
+    await refresh(root, cache, skip)
+    async with _lock:
+        yield
 
 
 def _in_folder(path: str, folder: str | None) -> bool:
