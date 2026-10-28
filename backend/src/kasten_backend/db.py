@@ -31,9 +31,12 @@ class Base(DeclarativeBase):
 
 engine = create_async_engine(
     get_settings().database_url,
-    # Nothing connects at startup; the first finance or RSVP request does. A
-    # host that drops packets rather than refusing would otherwise hold that
-    # request for the system's TCP timeout before it could answer 503.
+    # Nothing connects at startup; the first request that needs the database
+    # does: finance, RSVP, the token list or a token's actions, or any `/agent/`
+    # request a token makes, whose row the token record writes. A host that
+    # drops packets rather than refusing would otherwise hold a finance or RSVP
+    # request for the system's TCP timeout before it could answer 503; the
+    # token record has its own shorter timeout.
     connect_args={"connect_timeout": 5},
 )
 

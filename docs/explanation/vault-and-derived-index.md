@@ -1,7 +1,7 @@
 ---
 type: Explanation
 title: The vault and the derived index
-description: Why the notes live on disk and Postgres is allowed to hold nothing that matters.
+description: Why the notes live on disk, and Postgres holds nothing a note needs.
 tags: [design, vault, database, data-model]
 status: stable
 ---
@@ -28,14 +28,19 @@ kasten stops being maintained, or you stop liking it, you open the same files in
 Obsidian, in vim, in anything. There is no export step because there is nothing
 to export from.
 
-**Backup is a solved problem.** Make the vault a git repository and push it.
-That is backup and file history in one, and it costs nothing, because the vault
-is already plain text. Nobody has to write a database dump job.
+**Backup is a solved problem for notes.** Make the vault a git repository and
+push it. That is backup and file history in one, and it costs nothing, because
+the vault is already plain text. The notes need no database dump job; the
+`finance` schema does, and has one, as
+[Finance in Postgres](/explanation/finance-in-postgres.md#what-backing-up-now-means)
+and [Back up and restore](/how-to/back-up-and-restore.md#the-finance-dump-on-the-maintainers-server)
+say.
 
-**The database is disposable.** `db:reset` throws away every row and you lose
-no notes, only the RSVP reading places and the agent token record described
-below. That makes schema work
-cheap and takes the fear out of migrations.
+**The database is disposable, for notes.** `db:reset` throws away every row and
+you lose no notes. You do lose the `finance` rows, which nothing rebuilds, and
+the RSVP reading places and the agent token record described below. On a dev
+database those are test data, so schema work stays cheap there and migrations
+lose their fear.
 
 **Two writers are possible.** Editing a file on disk and editing it through the
 web page are the same operation, because the file is the thing. Sync tools,
@@ -53,8 +58,9 @@ every query, which at 10,000 notes takes under 20ms and cannot go stale. The
 backlinks panel is a search for the note's name, and the tag list reads the
 notes too. See [What is not decided yet](#what-is-not-decided-yet).
 
-The test for whether something belongs in the database is simple. If losing it
-would lose information, it does not belong there. Note text, titles and the
+The test for whether something belongs in the database is simple. Outside
+`finance` and the two tables below, if losing it would lose information, it
+does not belong there. Note text, titles and the
 links written inside a note are all recoverable by reading the vault again.
 Anything you cannot recover that way has to go into a file.
 
@@ -91,7 +97,7 @@ when it was last used and what it did. The tokens themselves live in
 ## What follows from it
 
 * `GET /api/files` reads the filesystem and does not consult Postgres at all. See [HTTP API](/reference/http-api.md).
-* The history of a note lives with the note, in a jj repo inside the vault, and not in a table. A version you cannot recover by reading the vault again would be information the database alone held, which is the one thing that is not allowed. See [Recover an earlier version of a note](/how-to/recover-an-earlier-version.md).
+* The history of a note lives with the note, in a jj repo inside the vault, and not in a table. A version you cannot recover by reading the vault again would be information the database alone held, which the rule does not allow for notes. See [Recover an earlier version of a note](/how-to/recover-an-earlier-version.md).
 * The vault is a bind mount to a host path in every environment, never a named Docker volume, so it survives the container lifecycle. See [Two environments](/explanation/environments.md).
 * Dev and prod never point at the same directory. A dev bug that rewrites files would otherwise eat real notes.
 * The vault path is configuration, not a constant. See [Configuration](/reference/configuration.md).
