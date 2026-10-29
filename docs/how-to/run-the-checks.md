@@ -17,7 +17,8 @@ mise run fe:typecheck # builds the frontend, then tsc --noEmit
 ```
 
 CI runs the same three in two jobs, Lint and Test. Both must pass before a pull
-request can merge into main. A pull request or push to main that changes no file,
+request can merge into main, and so must the `Review`, `Security` and `Human gate`
+checks below. A pull request or push to main that changes no file,
 such as a placeholder on an empty commit, skips them both, and a skipped job
 counts as passed.
 
@@ -253,8 +254,10 @@ held Design points. An agent fixes whatever it is told, so read those 5
 yourself to judge whether the Design points were worth making.
 
 A pull request from a fork or from Dependabot gets no review, as its run sees
-no token: read it yourself. A draft gets none until it is marked ready. A run that fails, say on the plan's usage limit,
-counts no round; rerun it.
+no token: read it yourself. A draft gets none until it is marked ready. A run
+that fails, say on the plan's usage limit, counts no round; rerun it. `Review`,
+`Security` and `Human gate` are required checks, so a failed run blocks the
+merge until it passes.
 
 ## Approve a held pull request
 
@@ -263,8 +266,10 @@ The `Human gate` check holds a pull request that touches a path on
 paths. To let it merge, read it and add the `approved` label yourself: only the
 repository owner's label counts, and the next push takes it off again.
 
-While the pilot runs, the gate only reports: `ENFORCE: false` in
-`.github/workflows/human-gate.yml` keeps it from blocking anything.
+A Dependabot pull request touches a lock file, so it always waits for you. Its
+own runs may not post the gate's status, as GitHub gives them a read-only token;
+your label starts a run that can. To make the gate report and not block, set
+`ENFORCE: false` in `.github/workflows/human-gate.yml`.
 
 ## Related
 
