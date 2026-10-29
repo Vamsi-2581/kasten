@@ -1,12 +1,6 @@
-"""CI's Lint job runs both structure checks on the whole repo.
+"""CI's Lint job runs each structure check on the whole repo; pre-commit sees staged files only.
 
-CI's lint job runs `mise run lint`, and lint must reach the bare file-size run
-and the `--all` fan-out run, the modes that check the whole repo. The
-pre-commit hook only sees staged files, so without these an oversized file or
-folder could merge. The ci.yml checks read the text rather than parsing YAML,
-because the backend env has no YAML parser as a direct dependency. The ruff
-structure rules (complexity, argument count, relative imports) get the same
-proof: each must still fail on new growth, against the repo's real pyproject.toml.
+ci.yml is read as text, as the backend env has no YAML parser among its direct dependencies.
 """
 
 import re
@@ -24,7 +18,11 @@ from backend.tests.structure.repo import REPO
 if TYPE_CHECKING:
     from pathlib import Path
 
-RUNS = ["scripts/structure/check-file-size", "scripts/structure/check-fan-out --all"]
+RUNS = [
+    "scripts/structure/check-file-size",
+    "scripts/structure/check-fan-out --all",
+    "uv run python scripts/structure/check-comments",
+]
 
 
 def reached(tasks: dict[str, dict], name: str, found: set[str] | None = None) -> set[str]:
@@ -36,7 +34,7 @@ def reached(tasks: dict[str, dict], name: str, found: set[str] | None = None) ->
     return found
 
 
-def test_the_ci_lint_job_runs_both_checks_on_the_whole_repo() -> None:
+def test_the_ci_lint_job_runs_the_checks_on_the_whole_repo() -> None:
     ci = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     lint_job = ci.split("\n  lint:\n", 1)[1].split("\n  test:\n", 1)[0]
     assert any(line.strip() == "run: mise run lint" for line in lint_job.splitlines())
@@ -66,6 +64,7 @@ def test_the_scripts_are_committed_executable() -> None:
     ).stdout
     modes = {line.split("\t")[1]: line.split()[0] for line in listing.splitlines()}
     assert set(modes) == {
+        "scripts/structure/check-comments",
         "scripts/structure/check-fan-out",
         "scripts/structure/check-file-size",
         "scripts/structure/editor-hook",
