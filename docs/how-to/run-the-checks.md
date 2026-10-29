@@ -1,7 +1,7 @@
 ---
 type: How-to Guide
 title: Run the checks
-description: Run the linters, tests and type checks, and get past the two ways the git hooks go wrong.
+description: Run the linters, tests and type checks, answer the CI review, approve a held pull request, and get past the two ways the git hooks go wrong.
 tags: [testing, lint, git-hooks, ci]
 status: stable
 ---
@@ -224,6 +224,47 @@ runs as uid 1000 and cannot then write to it.
 
 If pnpm built that tree, `.container/pnpm-store` is beside it holding a few
 hundred megabytes that nothing reads any more. Delete it whenever you notice.
+
+## Answer the review on a pull request
+
+Every pull request from this repo gets two Claude reviews in CI, `Review` and
+`Security`, once Lint and Test pass; a pull request that fails either gets no
+round. Only Important findings become threads on the lines they name, and main
+takes no merge while a thread is open. Design, Pre-existing and Nit findings
+from `Review` are lines in its summary comment, and nothing waits on them.
+`REVIEW.md` at the root of the repo says what they look for, and the review
+also reads the issues the pull request closes or is part of, when pgoell wrote
+them.
+
+1. Answer each Important thread with a reply whose first word says what you
+   did, then resolve it: `Fixed` (with a test), `Rejected` (it is not a bug,
+   and why), `Intentional` (it is meant so, and why) or `Didn't matter`.
+2. Read the summary. Make the Design changes you agree with, open an issue for
+   each Pre-existing line, and leave the rest.
+3. Push. Each review reads only the commits since its last round. After three
+   rounds it stops and says so in its round comment: rethink the change rather
+   than push a fourth fix.
+
+To see how the findings were answered, run
+`python3 .github/review/outcomes.py [days] [sample size]`. It counts the
+Important threads of pull requests merged in the last 7 days by the first word
+of their answer, counts pull requests by rounds, and lists 5 whose summaries
+held Design points. An agent fixes whatever it is told, so read those 5
+yourself to judge whether the Design points were worth making.
+
+A pull request from a fork or from Dependabot gets no review, as its run sees
+no token: read it yourself. A draft gets none until it is marked ready. A run that fails, say on the plan's usage limit,
+counts no round; rerun it.
+
+## Approve a held pull request
+
+The `Human gate` check holds a pull request that touches a path on
+`.github/review/risk-paths`, or carries the `hold` label. Its summary lists the
+paths. To let it merge, read it and add the `approved` label yourself: only the
+repository owner's label counts, and the next push takes it off again.
+
+While the pilot runs, the gate only reports: `ENFORCE: false` in
+`.github/workflows/human-gate.yml` keeps it from blocking anything.
 
 ## Related
 
